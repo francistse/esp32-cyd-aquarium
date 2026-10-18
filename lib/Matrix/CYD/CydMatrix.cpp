@@ -698,13 +698,26 @@ void CydMatrix::compositeLayers() {
     return;
   }
 
+  const float z = cameraZoom < 1.0f ? 1.0f : cameraZoom;
+  const int32_t maxX = CydMatrixSettings::LOGICAL_WIDTH - 1;
+  const int32_t maxY = CydMatrixSettings::LOGICAL_HEIGHT - 1;
+
   for (uint16_t y = 0; y < CydMatrixSettings::LOGICAL_HEIGHT; ++y) {
     for (uint16_t x = 0; x < CydMatrixSettings::LOGICAL_WIDTH; ++x) {
-      const CRGB foregroundPixel = foreground->pixels->data[y][x];
+      const int32_t sampleX = static_cast<int32_t>(
+          cameraOriginX + (static_cast<float>(x) + 0.5f) / z);
+      const int32_t sampleY = static_cast<int32_t>(
+          cameraOriginY + (static_cast<float>(y) + 0.5f) / z);
+      const uint16_t sx =
+          static_cast<uint16_t>(constrain(sampleX, 0, maxX));
+      const uint16_t sy =
+          static_cast<uint16_t>(constrain(sampleY, 0, maxY));
+
+      const CRGB foregroundPixel = foreground->pixels->data[sy][sx];
       const bool hasForeground =
           foregroundPixel != foreground->transparency_colour;
       const CRGB source =
-          hasForeground ? foregroundPixel : background->pixels->data[y][x];
+          hasForeground ? foregroundPixel : background->pixels->data[sy][sx];
       const CRGB corrected =
           hasForeground
               ? applyDisplayProfile(source, CYD_FOREGROUND_BRIGHTNESS,

@@ -69,7 +69,8 @@ inline constexpr int TOUCH_RAW_MAX_X = 3900;
 inline constexpr int TOUCH_RAW_MIN_Y = 200;
 inline constexpr int TOUCH_RAW_MAX_Y = 3900;
 inline constexpr bool TOUCH_SWAP_XY = false;
-inline constexpr bool TOUCH_INVERT_X = false;
+// ESP32-2432S028R XPT2046 maps raw X opposite to portrait screen X.
+inline constexpr bool TOUCH_INVERT_X = true;
 inline constexpr bool TOUCH_INVERT_Y = false;
 
 }  // namespace CydMatrixSettings

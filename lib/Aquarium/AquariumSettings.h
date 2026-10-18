@@ -25,13 +25,17 @@ const float HEALTH_INCREASE_RATE_GOOD = 0.05f;    // 5% per second
 // const float HEALTH_INCREASE_RATE_GOOD = 1 / (3600 * 30); // 100% per hour at 30 fps
 
 #if defined(PANEL_CYD_TFT)
-#define NUM_FISH_START 8
+#define NUM_FISH_START 12
 #define NUM_FISH_IDEAL 12
 #else
 #define NUM_FISH_START 5
 #define NUM_FISH_IDEAL 10
 #endif
 #define NUM_PLANTS 3
+
+// Weighted roster refill when a slot opens (desk-toy rare spawn clock).
+#define SPECIES_REFILL_MIN_MS (20UL * 60000UL)
+#define SPECIES_REFILL_MAX_MS (40UL * 60000UL)
 
 //PLANT SETTINGS
 

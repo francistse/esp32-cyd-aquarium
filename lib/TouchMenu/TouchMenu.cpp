@@ -181,6 +181,7 @@ void TouchMenu::displayMenu() {
         if (itemToConfirm == "Factory Reset") {
           webServerManager->nw.reset();
           LittleFS.remove("/aquarium_state.json");
+          LittleFS.remove("/field_guide.json");
           LittleFS.remove("/state.json");
           ESP.restart();
         } else if (itemToConfirm == "Reset WiFi Settings?") {

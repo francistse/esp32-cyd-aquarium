@@ -271,6 +271,7 @@ void WebServerManager::setupInterface() {
     log_i("[*] Resetting factory settings");
     nw.reset();
     LittleFS.remove("/aquarium_state.json");
+    LittleFS.remove("/field_guide.json");
     LittleFS.remove("/state.json");
     ESP.restart();
   });

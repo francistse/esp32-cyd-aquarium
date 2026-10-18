@@ -17,6 +17,7 @@ void AquariumStateManager::saveState(const std::vector<std::unique_ptr<Fish>>& f
         JsonObject fishJson = fishesJson.add<JsonObject>();
         fishJson["age"] = fish->getAge();
         fishJson["health"] = fish->getHealth();
+        fishJson["speciesId"] = static_cast<uint8_t>(fish->getSpeciesId());
         fishJson["bodyType"] = fish->getBodyType();
         fishJson["headType"] = fish->getHeadType();
         fishJson["tailType"] = fish->getTailType();
@@ -87,6 +88,11 @@ bool AquariumStateManager::loadState(std::vector<std::unique_ptr<Fish>>& fishArr
         Fish::FishDefinition fishDef;
         fishDef.age = fishJson["age"];
         fishDef.health = fishJson["health"];
+        if (fishJson["speciesId"].is<int>()) {
+            fishDef.speciesId = static_cast<int16_t>(fishJson["speciesId"].as<int>());
+        } else {
+            fishDef.speciesId = -1;
+        }
         fishDef.bodyType = fishJson["bodyType"].as<String>();
         fishDef.headType = fishJson["headType"].as<String>();
         fishDef.tailType = fishJson["tailType"].as<String>();

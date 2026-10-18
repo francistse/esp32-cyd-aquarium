@@ -44,3 +44,7 @@ vite.config.ts.timestamp-*
 # Local tools
 mklittlefs
 mklittlefs.exe
+
+# Python bytecode
+__pycache__/
+*.py[cod]

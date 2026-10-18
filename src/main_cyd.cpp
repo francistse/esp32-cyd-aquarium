@@ -525,6 +525,42 @@ bool ntpEverSynced = false;
 uint16_t ambientRawEma = 0;
 uint8_t ambientBacklightPercent = CYD_AUTO_BACKLIGHT_MAX_PERCENT;
 bool ambientBacklightReady = false;
+#else
+#ifndef CYD_MANUAL_BACKLIGHT_PERCENT
+#define CYD_MANUAL_BACKLIGHT_PERCENT 40
+#endif
+uint8_t manualBacklightPercent = CYD_MANUAL_BACKLIGHT_PERCENT;
+unsigned long backlightHudUntilMs = 0;
+unsigned long lastBrightnessStepMs = 0;
+
+void setManualBacklight(uint8_t percent) {
+  percent = constrain(percent, 12, 100);
+  manualBacklightPercent = percent;
+  matrix.setBacklightPercent(percent);
+  backlightHudUntilMs = millis() + 1600;
+  Serial.printf("backlight manual=%u\n", percent);
+}
+
+void stepManualBacklight(int delta) {
+  const int next = static_cast<int>(manualBacklightPercent) + delta;
+  setManualBacklight(static_cast<uint8_t>(constrain(next, 12, 100)));
+}
+
+void drawCenteredPixelText(const char* text, int16_t centerX, int16_t y,
+                           uint8_t scale, uint8_t letterSpacing,
+                           uint16_t color, uint16_t shadowColor);
+
+void renderBacklightHud() {
+  if (matrix.foreground == nullptr || millis() > backlightHudUntilMs) {
+    return;
+  }
+
+  char label[4] = {};
+  snprintf(label, sizeof(label), "%u", manualBacklightPercent);
+  drawCenteredPixelText(label, CydMatrixSettings::LOGICAL_WIDTH / 2, 16, 1, 1,
+                        matrix.foreground->color565(255, 214, 96),
+                        matrix.foreground->color565(0, 0, 0));
+}
 #endif
 
 struct PixelGlyph {
@@ -574,6 +610,9 @@ PixelGlyph glyphFor(char rawChar) {
     case '.': return {{"0", "0", "0", "0", "1"}};
     case '/': return {{"001", "001", "010", "100", "100"}};
     case '-': return {{"000", "000", "111", "000", "000"}};
+    case '<': return {{"001", "010", "100", "010", "001"}};
+    case '>': return {{"100", "010", "001", "010", "100"}};
+    case ' ': return {{"00", "00", "00", "00", "00"}};
     default: return {{"0", "0", "0", "0", "0"}};
   }
 }
@@ -630,6 +669,76 @@ void drawCenteredPixelText(const char* text, int16_t centerX, int16_t y,
   const int16_t x = centerX - static_cast<int16_t>(width / 2);
   drawPixelText(text, x + 1, y + 1, scale, letterSpacing, shadowColor);
   drawPixelText(text, x, y, scale, letterSpacing, color);
+}
+
+// Word-wraps uppercase guide copy into centered lines. Returns lines drawn.
+uint8_t drawWrappedPixelText(const char* text, int16_t centerX, int16_t startY,
+                             uint16_t maxWidth, uint8_t maxLines,
+                             uint8_t linePitch, uint8_t scale,
+                             uint8_t letterSpacing, uint16_t color,
+                             uint16_t shadowColor) {
+  if (text == nullptr || maxLines == 0) {
+    return 0;
+  }
+
+  const char* cursor = text;
+  uint8_t lineCount = 0;
+  char line[28];
+
+  while (*cursor != '\0' && lineCount < maxLines) {
+    while (*cursor == ' ') {
+      cursor++;
+    }
+    if (*cursor == '\0') {
+      break;
+    }
+
+    const char* lineStart = cursor;
+    const char* lineEnd = cursor;
+    while (*cursor != '\0') {
+      while (*cursor == ' ') {
+        cursor++;
+      }
+      if (*cursor == '\0') {
+        break;
+      }
+      const char* wordEnd = cursor;
+      while (*wordEnd != '\0' && *wordEnd != ' ') {
+        wordEnd++;
+      }
+
+      const size_t trialLen = static_cast<size_t>(wordEnd - lineStart);
+      if (trialLen == 0 || trialLen >= sizeof(line)) {
+        break;
+      }
+      char trial[28];
+      memcpy(trial, lineStart, trialLen);
+      trial[trialLen] = '\0';
+      const bool tooWide =
+          pixelTextWidth(trial, scale, letterSpacing) > maxWidth;
+      if (tooWide && lineEnd != lineStart) {
+        cursor = lineEnd;
+        break;
+      }
+      lineEnd = wordEnd;
+      cursor = wordEnd;
+      if (tooWide) {
+        break;
+      }
+    }
+
+    const size_t len = static_cast<size_t>(lineEnd - lineStart);
+    if (len == 0 || len >= sizeof(line)) {
+      break;
+    }
+    memcpy(line, lineStart, len);
+    line[len] = '\0';
+    drawCenteredPixelText(line, centerX,
+                          startY + static_cast<int16_t>(lineCount * linePitch),
+                          scale, letterSpacing, color, shadowColor);
+    lineCount++;
+  }
+  return lineCount;
 }
 
 int monthFromBuildName(const char* month) {
@@ -957,7 +1066,17 @@ void setupAmbientBacklight() {}
 void updateAmbientBacklight() {}
 #endif
 
-void renderClockOverlay() {
+bool fillCurrentLocalTime(tm* outTime) {
+  if (outTime == nullptr || clockBaseEpoch <= 0) {
+    return false;
+  }
+  const time_t now =
+      clockBaseEpoch + static_cast<time_t>((millis() - clockBaseMillis) / 1000);
+  localtime_r(&now, outTime);
+  return true;
+}
+
+void renderClockOverlay(bool showTgif) {
   if (matrix.foreground == nullptr || clockBaseEpoch <= 0) {
     return;
   }
@@ -968,10 +1087,10 @@ void renderClockOverlay() {
                                       "MAY", "JUN", "JUL", "AUG",
                                       "SEP", "OCT", "NOV", "DEC"};
 
-  const time_t now =
-      clockBaseEpoch + static_cast<time_t>((millis() - clockBaseMillis) / 1000);
   tm currentTime = {};
-  localtime_r(&now, &currentTime);
+  if (!fillCurrentLocalTime(&currentTime)) {
+    return;
+  }
 
   char timeText[6] = {};
   char meridiemText[3] = {};
@@ -995,6 +1114,7 @@ void renderClockOverlay() {
   const uint16_t timeColor = matrix.foreground->color565(224, 248, 238);
   const uint16_t dateColor = matrix.foreground->color565(132, 222, 190);
   const uint16_t shadowColor = matrix.foreground->color565(0, 6, 8);
+  const uint16_t tgifColor = matrix.foreground->color565(255, 210, 90);
 
   const uint8_t timeScale = 2;
   const uint8_t timeSpacing = 1;
@@ -1023,9 +1143,391 @@ void renderClockOverlay() {
                 timeColor);
   drawPixelText(secondsText, suffixX, secondsY, suffixScale, suffixSpacing,
                 dateColor);
+  if (showTgif) {
+    drawCenteredPixelText("TGIF", centerX,
+                          CydMatrixSettings::LOGICAL_HEIGHT - 16, 1, 1,
+                          tgifColor, shadowColor);
+  }
   drawCenteredPixelText(dateText, centerX,
                         CydMatrixSettings::LOGICAL_HEIGHT - 8, 1, 1,
                         dateColor, shadowColor);
+#if !CYD_AUTO_BACKLIGHT
+  renderBacklightHud();
+#endif
+}
+
+enum class GuideMode : uint8_t { Closed, Index, Detail };
+GuideMode guideMode = GuideMode::Closed;
+int16_t guideDetailIndex = -1;
+uint8_t guidePage = 0;
+
+static constexpr int kGuideCols = 3;
+static constexpr int kGuideRows = 4;
+static constexpr int kGuidePerPage = kGuideCols * kGuideRows;
+
+uint8_t guidePageCount() {
+  return static_cast<uint8_t>((SPECIES_COUNT + kGuidePerPage - 1) / kGuidePerPage);
+}
+
+void drawSpeciesPortrait(SpeciesId id, int16_t cx, int16_t cy, bool near,
+                         bool asSilhouette) {
+  if (matrix.foreground == nullptr) {
+    return;
+  }
+  const SpeciesInfo& info = speciesInfo(id);
+  const CRGB ink = CRGB(25, 35, 45);
+  CHSV hsv(info.hue, info.sat, info.val);
+  CRGB base;
+  hsv2rgb_rainbow(hsv, base);
+  auto colorOrSilhouette = [&](CRGB c) -> CRGB {
+    return asSilhouette ? ink : c;
+  };
+  const CRGB body = colorOrSilhouette(base);
+
+  switch (info.silhouette) {
+    case SilhouetteKind::Clownfish: {
+      const CRGB white = colorOrSilhouette(CRGB(245, 245, 250));
+      matrix.foreground->fillCircle(cx, cy, 4, body);
+      matrix.foreground->fillCircle(cx - 3, cy, 3, body);
+      matrix.foreground->fillCircle(cx + 2, cy, 2, white);
+      matrix.foreground->fillCircle(cx - 1, cy, 2, white);
+      matrix.foreground->fillCircle(cx - 4, cy, 1, white);
+      if (near && !asSilhouette) {
+        matrix.foreground->drawPixel(cx + 3, cy - 1, CRGB(10, 10, 20));
+      }
+      break;
+    }
+    case SilhouetteKind::BlueTang: {
+      const CRGB yellow = colorOrSilhouette(CRGB(255, 220, 40));
+      matrix.foreground->fillCircle(cx, cy, 4, body);
+      matrix.foreground->fillTriangle(cx - 6, cy, cx - 2, cy - 3, cx - 2, cy + 3,
+                                      yellow);
+      break;
+    }
+    case SilhouetteKind::YellowTang: {
+      matrix.foreground->fillCircle(cx, cy, 4, body);
+      matrix.foreground->fillTriangle(cx + 6, cy, cx + 2, cy - 2, cx + 2, cy + 2,
+                                      body);
+      break;
+    }
+    case SilhouetteKind::MoorishIdol: {
+      const CRGB black = colorOrSilhouette(CRGB(20, 20, 30));
+      const CRGB white = colorOrSilhouette(CRGB(245, 245, 250));
+      const CRGB yellow = colorOrSilhouette(CRGB(255, 210, 40));
+      matrix.foreground->fillCircle(cx, cy, 3, white);
+      matrix.foreground->fillCircle(cx - 1, cy, 3, black);
+      matrix.foreground->fillCircle(cx + 2, cy, 2, yellow);
+      matrix.foreground->drawLine(cx, cy - 3, cx + 1, cy - 9, white);
+      break;
+    }
+    case SilhouetteKind::Turtle: {
+      const CRGB limb = colorOrSilhouette(CRGB(100, 150, 90));
+      matrix.foreground->fillCircle(cx, cy, 4, body);
+      matrix.foreground->fillCircle(cx + 5, cy, 2, limb);
+      matrix.foreground->drawLine(cx - 2, cy - 4, cx - 5, cy - 6, limb);
+      matrix.foreground->drawLine(cx - 2, cy + 4, cx - 5, cy + 6, limb);
+      matrix.foreground->drawLine(cx + 2, cy - 4, cx + 4, cy - 6, limb);
+      matrix.foreground->drawLine(cx + 2, cy + 4, cx + 4, cy + 6, limb);
+      break;
+    }
+    case SilhouetteKind::Star: {
+      for (int i = 0; i < 5; ++i) {
+        const float a = -HALF_PI + i * TWO_PI / 5.0f;
+        matrix.foreground->drawLine(cx, cy, cx + cos(a) * 5, cy + sin(a) * 5,
+                                    body);
+        matrix.foreground->fillCircle(cx + cos(a) * 5, cy + sin(a) * 5, 1, body);
+      }
+      matrix.foreground->fillCircle(cx, cy, 2, body);
+      break;
+    }
+    case SilhouetteKind::Snake: {
+      for (int i = 0; i < 6; ++i) {
+        matrix.foreground->fillCircle(cx - 4 + i, cy + ((i % 2) ? 1 : -1), 1,
+                                      body);
+      }
+      matrix.foreground->fillCircle(cx + 3, cy, 2, body);
+      break;
+    }
+    case SilhouetteKind::Octopus: {
+      matrix.foreground->fillCircle(cx, cy - 1, 3, body);
+      for (int i = 0; i < 5; ++i) {
+        const float a = PI * 0.65f + i * 0.2f;
+        matrix.foreground->drawLine(cx, cy + 1, cx + cos(a) * 5,
+                                    cy + 1 + sin(a) * 5, body);
+      }
+      break;
+    }
+    case SilhouetteKind::Shark: {
+      matrix.foreground->fillCircle(cx, cy, 2, body);
+      matrix.foreground->fillCircle(cx - 3, cy, 2, body);
+      matrix.foreground->fillCircle(cx + 3, cy, 1, body);
+      matrix.foreground->drawLine(cx, cy - 2, cx + 1, cy - 5, body);
+      matrix.foreground->drawLine(cx - 5, cy - 2, cx - 5, cy + 2, body);
+      break;
+    }
+    case SilhouetteKind::WhaleShark: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->fillCircle(cx - 4, cy, 2, body);
+      matrix.foreground->fillCircle(cx + 4, cy, 2, body);
+      if (!asSilhouette) {
+        matrix.foreground->drawPixel(cx - 1, cy - 1, CRGB(240, 240, 245));
+        matrix.foreground->drawPixel(cx + 1, cy - 1, CRGB(240, 240, 245));
+      }
+      break;
+    }
+    case SilhouetteKind::Manta: {
+      matrix.foreground->fillCircle(cx, cy, 2, body);
+      matrix.foreground->fillTriangle(cx, cy, cx - 6, cy - 2, cx - 6, cy + 2, body);
+      matrix.foreground->fillTriangle(cx, cy, cx + 6, cy - 2, cx + 6, cy + 2, body);
+      matrix.foreground->drawLine(cx, cy, cx, cy + 5, body);
+      break;
+    }
+    case SilhouetteKind::Whale: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->fillCircle(cx - 4, cy, 2, body);
+      matrix.foreground->fillCircle(cx + 4, cy, 2, body);
+      matrix.foreground->drawLine(cx - 6, cy - 2, cx - 6, cy + 2, body);
+      break;
+    }
+    case SilhouetteKind::Prop: {
+      if (id == SpeciesId::Anemone) {
+        for (int i = -2; i <= 2; ++i) {
+          matrix.foreground->drawLine(cx, cy + 3, cx + i * 2, cy - 3, body);
+        }
+      } else if (id == SpeciesId::Kelp) {
+        matrix.foreground->drawLine(cx, cy + 5, cx - 1, cy - 5, body);
+        matrix.foreground->drawLine(cx, cy + 5, cx + 2, cy - 4, body);
+      } else if (id == SpeciesId::FishFlake) {
+        matrix.foreground->drawPixel(cx, cy, body);
+        matrix.foreground->drawPixel(cx + 1, cy, body);
+        matrix.foreground->drawPixel(cx, cy + 1, body);
+      } else {
+        // Chromis dots and other props.
+        matrix.foreground->drawPixel(cx + 1, cy, body);
+        matrix.foreground->drawPixel(cx, cy, body);
+        matrix.foreground->drawPixel(cx - 1, cy, body);
+      }
+      break;
+    }
+    case SilhouetteKind::ChromisShoal: {
+      matrix.foreground->fillCircle(cx, cy, 2, body);
+      matrix.foreground->fillCircle(cx - 2, cy, 2, body);
+      matrix.foreground->drawLine(cx - 4, cy, cx - 6, cy - 2, body);
+      matrix.foreground->drawLine(cx - 4, cy, cx - 6, cy + 2, body);
+      break;
+    }
+    case SilhouetteKind::Fusilier: {
+      matrix.foreground->fillCircle(cx + 1, cy, 2, body);
+      matrix.foreground->fillCircle(cx - 2, cy, 1, body);
+      matrix.foreground->fillCircle(cx + 3, cy, 1, body);
+      matrix.foreground->drawLine(cx - 4, cy, cx - 6, cy - 2, body);
+      matrix.foreground->drawLine(cx - 4, cy, cx - 6, cy + 2, body);
+      break;
+    }
+    case SilhouetteKind::Anthias: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->drawLine(cx, cy - 3, cx + 1, cy - 6, body);
+      matrix.foreground->drawLine(cx - 3, cy, cx - 5, cy - 2, body);
+      matrix.foreground->drawLine(cx - 3, cy, cx - 5, cy + 2, body);
+      break;
+    }
+    case SilhouetteKind::Cardinal: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->fillCircle(cx + 2, cy - 1, 1, CRGB(10, 10, 20));
+      matrix.foreground->fillTriangle(cx - 4, cy, cx - 2, cy - 2, cx - 2, cy + 2,
+                                      body);
+      break;
+    }
+    case SilhouetteKind::Sergeant: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->drawLine(cx - 1, cy - 3, cx - 1, cy + 3,
+                                  colorOrSilhouette(CRGB(20, 20, 30)));
+      matrix.foreground->drawLine(cx + 1, cy - 3, cx + 1, cy + 3,
+                                  colorOrSilhouette(CRGB(20, 20, 30)));
+      break;
+    }
+    case SilhouetteKind::Sweeper: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->fillTriangle(cx - 4, cy, cx - 2, cy - 2, cx - 2, cy + 1,
+                                      body);
+      break;
+    }
+    case SilhouetteKind::Silverside: {
+      matrix.foreground->drawPixel(cx + 2, cy, body);
+      matrix.foreground->drawPixel(cx + 1, cy, body);
+      matrix.foreground->drawPixel(cx, cy, body);
+      matrix.foreground->drawPixel(cx - 1, cy, body);
+      matrix.foreground->drawPixel(cx - 2, cy, body);
+      break;
+    }
+    case SilhouetteKind::Dartfish: {
+      matrix.foreground->drawPixel(cx + 3, cy, body);
+      matrix.foreground->drawPixel(cx + 1, cy, body);
+      matrix.foreground->drawPixel(cx - 1, cy, body);
+      matrix.foreground->drawPixel(cx - 3, cy, colorOrSilhouette(CRGB(245, 245, 250)));
+      break;
+    }
+    case SilhouetteKind::Surgeon: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->fillTriangle(cx - 5, cy, cx - 2, cy - 2, cx - 2, cy + 2,
+                                      body);
+      break;
+    }
+    case SilhouetteKind::Unicorn: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->fillCircle(cx + 4, cy, 1, body);
+      matrix.foreground->fillTriangle(cx - 5, cy, cx - 2, cy - 2, cx - 2, cy + 2,
+                                      body);
+      break;
+    }
+    case SilhouetteKind::Schooler:
+    default: {
+      matrix.foreground->fillCircle(cx, cy, 3, body);
+      matrix.foreground->fillCircle(cx - 3, cy, 2, body);
+      matrix.foreground->fillTriangle(cx + 4, cy, cx + 2, cy - 2, cx + 2, cy + 2,
+                                      body);
+      if (near && !asSilhouette) {
+        matrix.foreground->drawPixel(cx + 1, cy - 1, CRGB(10, 10, 20));
+      }
+      break;
+    }
+  }
+}
+
+void renderGuideScreen() {
+  if (matrix.foreground == nullptr || matrix.background == nullptr) {
+    return;
+  }
+
+  // Dim tank behind the guide.
+  for (uint16_t y = 0; y < CydMatrixSettings::LOGICAL_HEIGHT; ++y) {
+    for (uint16_t x = 0; x < CydMatrixSettings::LOGICAL_WIDTH; ++x) {
+      matrix.background->drawPixel(x, y, CRGB(4, 12, 22));
+      matrix.foreground->drawPixel(x, y,
+                                   matrix.foreground->transparency_colour);
+    }
+  }
+
+  const uint16_t titleColor = matrix.foreground->color565(224, 248, 238);
+  const uint16_t mutedColor = matrix.foreground->color565(120, 160, 150);
+  const uint16_t accentColor = matrix.foreground->color565(255, 210, 90);
+  const uint16_t shadowColor = matrix.foreground->color565(0, 6, 8);
+
+  if (guideMode == GuideMode::Index) {
+    if (guidePage >= guidePageCount()) {
+      guidePage = 0;
+    }
+    drawCenteredPixelText("REEF GUIDE", CydMatrixSettings::LOGICAL_WIDTH / 2, 2,
+                          1, 1, titleColor, shadowColor);
+    char progress[20] = {};
+    snprintf(progress, sizeof(progress), "%u/%u P%u",
+             aquarium.guide().discoveredCount(), SPECIES_COUNT, guidePage + 1);
+    drawCenteredPixelText(progress, CydMatrixSettings::LOGICAL_WIDTH / 2, 10, 1,
+                          1, mutedColor, shadowColor);
+
+    constexpr int cellW = 24;
+    constexpr int cellH = 20;
+    const int gridX = 4;
+    const int gridY = 18;
+    const uint8_t pageBase = static_cast<uint8_t>(guidePage * kGuidePerPage);
+    for (uint8_t slot = 0; slot < kGuidePerPage; ++slot) {
+      const uint8_t i = pageBase + slot;
+      if (i >= SPECIES_COUNT) {
+        break;
+      }
+      const int col = slot % kGuideCols;
+      const int row = slot / kGuideCols;
+      const int16_t cx = gridX + col * cellW + cellW / 2;
+      const int16_t cy = gridY + row * cellH + 7;
+      const bool found = aquarium.guide().isDiscovered(static_cast<SpeciesId>(i));
+      drawSpeciesPortrait(static_cast<SpeciesId>(i), cx, cy, false, !found);
+      if (!found) {
+        drawCenteredPixelText("?", cx, cy + 8, 1, 1, mutedColor, shadowColor);
+      }
+    }
+    // Page controls on a dedicated footer row (also the only close band).
+    const int16_t footerY = CydMatrixSettings::LOGICAL_HEIGHT - 7;
+    if (guidePageCount() > 1) {
+      drawPixelText("PREV", 2, footerY, 1, 1, accentColor);
+      drawPixelText("NEXT", CydMatrixSettings::LOGICAL_WIDTH - 22, footerY, 1, 1,
+                    accentColor);
+    }
+    drawCenteredPixelText("BACK", CydMatrixSettings::LOGICAL_WIDTH / 2, footerY,
+                          1, 1, accentColor, shadowColor);
+  } else if (guideMode == GuideMode::Detail && guideDetailIndex >= 0 &&
+             guideDetailIndex < SPECIES_COUNT) {
+    const SpeciesId id = static_cast<SpeciesId>(guideDetailIndex);
+    const SpeciesInfo& info = speciesInfo(id);
+    const bool found = aquarium.guide().isDiscovered(id);
+    const int16_t centerX = CydMatrixSettings::LOGICAL_WIDTH / 2;
+    drawSpeciesPortrait(id, centerX, 14, true, !found);
+    drawCenteredPixelText(found ? info.shortName : "???", centerX, 24, 1, 1,
+                          titleColor, shadowColor);
+    constexpr int16_t descY = 36;
+    constexpr uint8_t linePitch = 7;
+    const uint8_t lines =
+        found ? drawWrappedPixelText(info.description, centerX, descY, 76, 6,
+                                     linePitch, 1, 1, mutedColor, shadowColor)
+              : 0;
+    if (!found) {
+      drawCenteredPixelText("STILL HIDDEN", centerX, descY, 1, 1, mutedColor,
+                            shadowColor);
+    } else {
+      char seen[16] = {};
+      snprintf(seen, sizeof(seen), "SEEN %lu",
+               static_cast<unsigned long>(aquarium.guide().timesSeen(id)));
+      int16_t seenY = descY + static_cast<int16_t>(lines * linePitch) + 2;
+      const int16_t seenMaxY = CydMatrixSettings::LOGICAL_HEIGHT - 20;
+      if (seenY > seenMaxY) {
+        seenY = seenMaxY;
+      }
+      drawCenteredPixelText(seen, centerX, seenY, 1, 1, accentColor,
+                            shadowColor);
+    }
+    drawCenteredPixelText("BACK", CydMatrixSettings::LOGICAL_WIDTH / 2,
+                          CydMatrixSettings::LOGICAL_HEIGHT - 7, 1, 1,
+                          accentColor, shadowColor);
+  }
+}
+
+void renderZoomHud() {
+  if (!aquarium.isCameraNear() || matrix.foreground == nullptr) {
+    return;
+  }
+  const uint16_t labelColor = matrix.foreground->color565(224, 248, 238);
+  const uint16_t shadowColor = matrix.foreground->color565(0, 6, 8);
+  const uint16_t minusColor = matrix.foreground->color565(255, 210, 90);
+  const SpeciesId id = aquarium.camera().followSpecies;
+  drawCenteredPixelText(speciesInfo(id).shortName,
+                        CydMatrixSettings::LOGICAL_WIDTH / 2, 3, 1, 1,
+                        labelColor, shadowColor);
+  // Minus control in the top-right corner.
+  drawPixelText("-", CydMatrixSettings::LOGICAL_WIDTH - 8, 3, 1, 1, minusColor);
+}
+
+void renderAquariumOverlays() {
+  if (matrix.foreground == nullptr) {
+    return;
+  }
+
+  const uint16_t bubbleColor = matrix.foreground->color565(255, 245, 180);
+  const uint16_t diaryColor = matrix.foreground->color565(200, 240, 220);
+  const uint16_t shadowColor = matrix.foreground->color565(0, 6, 8);
+
+  char pokeText[20] = {};
+  int16_t pokeX = 0;
+  int16_t pokeY = 0;
+  if (aquarium.hasPokeBubble(pokeText, sizeof(pokeText), &pokeX, &pokeY)) {
+    drawPixelText(pokeText, pokeX + 1, pokeY + 1, 1, 1, shadowColor);
+    drawPixelText(pokeText, pokeX, pokeY, 1, 1, bubbleColor);
+  }
+
+  char diaryText[32] = {};
+  if (aquarium.hasDiary(diaryText, sizeof(diaryText))) {
+    drawCenteredPixelText(diaryText, CydMatrixSettings::LOGICAL_WIDTH / 2,
+                          CydMatrixSettings::LOGICAL_HEIGHT / 2 - 2, 1, 1,
+                          diaryColor, shadowColor);
+  }
 }
 
 void forceFixedEnvironment() {
@@ -1197,8 +1699,16 @@ void setup() {
   forcePreviewDisplayState();
   matrix.setBrightness(stateManager.getState()->brightness);
   setupAmbientBacklight();
+#if !CYD_AUTO_BACKLIGHT
+  setManualBacklight(CYD_MANUAL_BACKLIGHT_PERCENT);
+  Serial.println("backlight control=touch top, left dims, right brightens");
+#endif
 
   aquarium.begin();
+  aquarium.camera().configure(
+      CydMatrixSettings::LOGICAL_WIDTH, CydMatrixSettings::LOGICAL_HEIGHT,
+      CydMatrixSettings::VIEWPORT_X, CydMatrixSettings::VIEWPORT_Y,
+      CydMatrixSettings::VIEWPORT_WIDTH, CydMatrixSettings::VIEWPORT_HEIGHT);
 }
 
 void loop() {
@@ -1206,6 +1716,22 @@ void loop() {
 #if CYD_TOUCH_DEBUG
   static unsigned long lastTouchDebugTime = 0;
 #endif
+  static bool pendingTankGesture = false;
+  static bool feedHoldStarted = false;
+  static bool pendingDateGesture = false;
+  static bool guideHoldOpened = false;
+  static unsigned long pressStartMs = 0;
+  static uint16_t pressLogicalX = 0;
+  static uint16_t pressLogicalY = 0;
+  static uint16_t pressScreenX = 0;
+  static uint16_t pressScreenY = 0;
+  constexpr unsigned long kFeedHoldMs = 280;
+  constexpr unsigned long kGuideHoldMs = 450;
+  constexpr uint16_t kDateBandTop =
+      CydMatrixSettings::LOGICAL_HEIGHT > 12
+          ? CydMatrixSettings::LOGICAL_HEIGHT - 12
+          : 0;
+
   const unsigned long now = millis();
   updateClockSync();
   updateAmbientBacklight();
@@ -1214,16 +1740,137 @@ void loop() {
     lastFrameTime = now;
     const uint32_t frameStartUs = micros();
     const CydTouchPoint& touchPoint = touch.update();
+
+    float worldX = touchPoint.logicalX;
+    float worldY = touchPoint.logicalY;
+    aquarium.camera().screenToWorld(touchPoint.screenX, touchPoint.screenY,
+                                    &worldX, &worldY);
+
+#if !CYD_AUTO_BACKLIGHT
+    const bool brightnessTouch =
+        guideMode == GuideMode::Closed && touchPoint.pressed &&
+        touchPoint.logicalY <= 16;
+#else
+    const bool brightnessTouch = false;
+#endif
+    const bool dateTouch = guideMode == GuideMode::Closed &&
+                           touchPoint.pressed &&
+                           touchPoint.logicalY >= kDateBandTop;
     if (touch.pressedStarted()) {
-      aquarium.onTouchStarted();
+      pendingTankGesture = false;
+      feedHoldStarted = false;
+      pendingDateGesture = false;
+      guideHoldOpened = false;
+      pressStartMs = now;
+      pressLogicalX = touchPoint.logicalX;
+      pressLogicalY = touchPoint.logicalY;
+      pressScreenX = touchPoint.screenX;
+      pressScreenY = touchPoint.screenY;
+
+      if (guideMode != GuideMode::Closed) {
+        // Handled on release.
+      } else if (brightnessTouch) {
+#if !CYD_AUTO_BACKLIGHT
+        stepManualBacklight(
+            touchPoint.logicalX < CydMatrixSettings::LOGICAL_WIDTH / 2 ? -15
+                                                                       : 15);
+        lastBrightnessStepMs = now;
+#endif
+      } else if (dateTouch) {
+        pendingDateGesture = true;
+      } else {
+        pendingTankGesture = true;
+      }
       printTouchDebug("down", touchPoint);
 #if CYD_TOUCH_DEBUG
       lastTouchDebugTime = now;
 #endif
     } else if (touch.pressedReleased()) {
+      aquarium.camera().screenToWorld(pressScreenX, pressScreenY, &worldX,
+                                      &worldY);
+
+      if (guideMode == GuideMode::Index) {
+        // Opening hold ends on the date band; ignore that release so the
+        // guide stays open.
+        constexpr int16_t kGuideFooterTop =
+            CydMatrixSettings::LOGICAL_HEIGHT - 12;
+        if (guideHoldOpened) {
+          // Keep guide open after the hold that opened it.
+        } else if (pressLogicalY >= kGuideFooterTop) {
+          const uint8_t pages = guidePageCount();
+          const bool prevHit = pages > 1 && pressLogicalX < 28;
+          const bool nextHit =
+              pages > 1 &&
+              pressLogicalX >= CydMatrixSettings::LOGICAL_WIDTH - 28;
+          if (prevHit) {
+            guidePage = (guidePage + pages - 1) % pages;
+          } else if (nextHit) {
+            guidePage = (guidePage + 1) % pages;
+          } else {
+            guideMode = GuideMode::Closed;
+          }
+        } else {
+          constexpr int cellW = 24;
+          constexpr int cellH = 20;
+          const int gridX = 4;
+          const int gridY = 18;
+          const int col = (pressLogicalX - gridX) / cellW;
+          const int row = (pressLogicalY - gridY) / cellH;
+          if (col >= 0 && col < kGuideCols && row >= 0 && row < kGuideRows) {
+            const int index =
+                static_cast<int>(guidePage) * kGuidePerPage + row * kGuideCols +
+                col;
+            if (index >= 0 && index < SPECIES_COUNT) {
+              guideDetailIndex = static_cast<int16_t>(index);
+              guideMode = GuideMode::Detail;
+            }
+          }
+        }
+      } else if (guideMode == GuideMode::Detail) {
+        guideMode = GuideMode::Index;
+      } else if (pendingDateGesture && !guideHoldOpened) {
+        aquarium.showDiary();
+      } else if (pendingTankGesture && !feedHoldStarted) {
+        const bool pressedMinus =
+            pressLogicalX >= CydMatrixSettings::LOGICAL_WIDTH - 12 &&
+            pressLogicalY <= 12;
+        if (aquarium.isCameraNear()) {
+          if (pressedMinus) {
+            aquarium.zoomOutCamera();
+          } else if (!aquarium.pokeCreature(worldX, worldY)) {
+            aquarium.zoomOutCamera();
+          }
+        } else if (!aquarium.zoomToCreatureAt(worldX, worldY)) {
+          aquarium.dropPellet(worldX);
+        }
+      }
       aquarium.onTouchReleased();
+      pendingTankGesture = false;
+      feedHoldStarted = false;
+      pendingDateGesture = false;
+      guideHoldOpened = false;
       printTouchDebug("up", touchPoint);
+    } else if (pendingDateGesture && touch.isPressed() && !guideHoldOpened &&
+               now - pressStartMs >= kGuideHoldMs) {
+      guideHoldOpened = true;
+      guideMode = GuideMode::Index;
+      guideDetailIndex = -1;
+      guidePage = 0;
+      aquarium.zoomOutCamera();
+    } else if (pendingTankGesture && touch.isPressed() && !feedHoldStarted &&
+               guideMode == GuideMode::Closed &&
+               now - pressStartMs >= kFeedHoldMs) {
+      feedHoldStarted = true;
+      aquarium.onTouchStarted();
     }
+#if !CYD_AUTO_BACKLIGHT
+    else if (brightnessTouch && now - lastBrightnessStepMs >= 180) {
+      stepManualBacklight(
+          touchPoint.logicalX < CydMatrixSettings::LOGICAL_WIDTH / 2 ? -15
+                                                                     : 15);
+      lastBrightnessStepMs = now;
+    }
+#endif
 
 #if CYD_TOUCH_DEBUG
     if (touch.isPressed() && now - lastTouchDebugTime >= 500) {
@@ -1232,9 +1879,23 @@ void loop() {
     }
 #endif
 
+    tm localTime = {};
+    const tm* localTimePtr =
+        fillCurrentLocalTime(&localTime) ? &localTime : nullptr;
+
     forceFixedEnvironment();
-    aquarium.update(false);
-    renderClockOverlay();
+    aquarium.update(false, localTimePtr);
+
+    if (guideMode != GuideMode::Closed) {
+      renderGuideScreen();
+    } else {
+      if (!aquarium.isCameraNear()) {
+        renderClockOverlay(aquarium.shouldShowTgif());
+      } else {
+        renderZoomHud();
+      }
+      renderAquariumOverlays();
+    }
     aquarium.display();
     matrix.update();
     recordPerfDebug(micros() - frameStartUs);

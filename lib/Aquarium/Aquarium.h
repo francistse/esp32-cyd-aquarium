@@ -6,15 +6,22 @@
 #include <Fonts/Font5x7Fixed.h>
 #include <Matrix.h>
 #include <scd40.h>
+#include <time.h>
 
+#include <cstring>
+#include <limits>
 #include <vector>
 
 #include "AquariumSettings.h"
 #include "AquariumStateManager.h"
 #include "BoidManager.h"
+#include "FieldGuide.h"
 #include "Fish.h"
 #include "Food.h"
 #include "Plants.h"
+#include "SpeciesCatalog.h"
+#include "TankCamera.h"
+#include "TankDetail.h"
 #include "Water.h"
 #include "StateManager.h"
 
@@ -65,6 +72,10 @@ class Aquarium {
   std::vector<std::unique_ptr<Food>> foodArray;
   BoidManager boidManager;
   AquariumStateManager aquariumStateManager;
+  FieldGuide fieldGuide;
+  TankCamera tankCamera;
+  bool chromisDiscovered = false;
+  bool flakeDiscovered = false;
   unsigned long lastSaveTime;
   char buffer[100];
 
@@ -84,6 +95,38 @@ class Aquarium {
   unsigned long lastAutonomousFoodTime = 0;
   unsigned long nextAutonomousFoodDelay = 0;
 
+  // Desk events
+  unsigned long bootMs = 0;
+  uint32_t pelletsEaten = 0;
+  char pokeBubbleText[20] = {};
+  int16_t pokeBubbleX = 0;
+  int16_t pokeBubbleY = 0;
+  unsigned long pokeBubbleUntilMs = 0;
+  uint8_t pokePhraseIndex = 0;
+  static constexpr uint8_t TOUCH_PELLET_HISTORY = 12;
+  unsigned long touchPelletTimes[TOUCH_PELLET_HISTORY] = {};
+  Fish* touchPelletFish[TOUCH_PELLET_HISTORY] = {};
+  uint8_t touchPelletHead = 0;
+  uint8_t touchPelletStored = 0;
+  unsigned long murkUntilMs = 0;
+  unsigned long burpUntilMs = 0;
+  int16_t burpX = 0;
+  int16_t burpBaseY = 0;
+  unsigned long diaryUntilMs = 0;
+  char diaryText[32] = {};
+  bool weekendMode = false;
+  bool tgifActive = false;
+
+  enum class VisitorKind : uint8_t { None, CatPaw, Duck, Diver, Shadow };
+  VisitorKind visitorKind = VisitorKind::None;
+  unsigned long visitorStartMs = 0;
+  unsigned long visitorEndMs = 0;
+  unsigned long nextVisitorMs = 0;
+  unsigned long nextSpeciesRefillMs = 0;
+  float visitorX = 0;
+  float visitorY = 0;
+  float visitorSpeed = 0;
+
   enum class TextAlignment { LEFT, CENTER, RIGHT };
 
   float initialCreatureAge(uint8_t index = 0) {
@@ -101,28 +144,33 @@ class Aquarium {
 #endif
   }
 
-  const char* curatedCreatureType(uint8_t index) {
-#if CYD_CURATED_BOOT_POPULATION
-    switch (index) {
-      case 0:
-        return "Turtle";
-      case 1:
-        return random(0, 3) == 0 ? "Octopus" : "Fish";
-      case 2:
-      case 3:
-      case 5:
-      case 6:
-        return "Fish";
-      case 4:
-      case 7:
-        return "Star";
-      default:
-        return random(0, 5) == 0 ? "Turtle" : "Fish";
+  void markSpeciesOnScreen(bool* used) const {
+    for (uint8_t i = 0; i < SPECIES_COUNT; ++i) {
+      used[i] = false;
     }
-#else
-    (void)index;
-    return "Fish";
-#endif
+    for (const auto& fish : fishArray) {
+      const uint8_t id = static_cast<uint8_t>(fish->getSpeciesId());
+      if (id < SPECIES_COUNT) {
+        used[id] = true;
+      }
+    }
+  }
+
+  SpeciesId nextRosterSpecies() {
+    bool used[SPECIES_COUNT];
+    markSpeciesOnScreen(used);
+    return pickWeightedSwimmer(used);
+  }
+
+  void scheduleNextSpeciesRefill() {
+    nextSpeciesRefillMs =
+        millis() +
+        randomDelayBetween(SPECIES_REFILL_MIN_MS, SPECIES_REFILL_MAX_MS);
+  }
+
+  void spawnFishAt(uint8_t index, SpeciesId species) {
+    fishArray.emplace_back(std::make_unique<Fish>(
+        matrix, safeSpawnPosition(index), initialCreatureAge(index), species));
   }
 
   PVector safeSpawnPosition(uint8_t index) {
@@ -161,6 +209,46 @@ class Aquarium {
     return PVector(x, y);
   }
 
+  // Finger slack outside the drawn capsule; ambiguity rejects near-ties.
+  static constexpr float kHitSlack = 2.0f;
+  static constexpr float kHitAmbiguityMargin = 2.5f;
+
+  Fish* nearestCreatureAt(float worldX, float worldY, int8_t* outIndex) {
+    Fish* nearest = nullptr;
+    int8_t nearestIndex = -1;
+    float bestDist = 999.0f;
+    float secondBestDist = 999.0f;
+    int8_t secondIndex = -1;
+    for (size_t i = 0; i < fishArray.size(); ++i) {
+      if (!fishArray[i]->isPokeable()) {
+        continue;
+      }
+      const float dist = fishArray[i]->tapHitDistance(worldX, worldY);
+      if (dist > kHitSlack) {
+        continue;
+      }
+      if (dist < bestDist) {
+        secondBestDist = bestDist < 900.0f ? bestDist : secondBestDist;
+        secondIndex = nearestIndex;
+        bestDist = dist;
+        nearest = fishArray[i].get();
+        nearestIndex = static_cast<int8_t>(i);
+      } else if (dist < secondBestDist) {
+        secondBestDist = dist;
+        secondIndex = static_cast<int8_t>(i);
+      }
+    }
+    if (nearest != nullptr && secondIndex >= 0 &&
+        (secondBestDist - bestDist) < kHitAmbiguityMargin) {
+      nearest = nullptr;
+      nearestIndex = -1;
+    }
+    if (outIndex != nullptr) {
+      *outIndex = nearestIndex;
+    }
+    return nearest;
+  }
+
  public:
   Aquarium(Matrix* m, SCD40* s, StateManager* stateManager)
       : matrix(m),
@@ -174,15 +262,70 @@ class Aquarium {
         lastSaveTime(0) {}
 
   void begin() {
+    bootMs = millis();
+    tankCamera.configure(matrix->getXResolution(), matrix->getYResolution(),
+                         0, 1, 240, 318);
+    fieldGuide.begin();
 #if CYD_CURATED_BOOT_POPULATION
     initializeFish();
 #else
     loadState();
     ensureMinimumFishPopulation();
 #endif
+    scheduleNextSpeciesRefill();
     initializePlants();
     boidManager.initializeBoids();
     scheduleNextAutonomousFood(true);
+    scheduleNextVisitor(true);
+  }
+
+  TankCamera& camera() { return tankCamera; }
+  const TankCamera& camera() const { return tankCamera; }
+  FieldGuide& guide() { return fieldGuide; }
+  const FieldGuide& guide() const { return fieldGuide; }
+
+  void announceDiscovery(SpeciesId id) {
+    const SpeciesInfo& info = speciesInfo(id);
+    snprintf(pokeBubbleText, sizeof(pokeBubbleText), "NEW %s", info.shortName);
+    pokeBubbleX = matrix->getXResolution() / 2 -
+                  static_cast<int16_t>(strlen(pokeBubbleText) * 2);
+    if (pokeBubbleX < 1) {
+      pokeBubbleX = 1;
+    }
+    pokeBubbleY = 16;
+    pokeBubbleUntilMs = millis() + 2200;
+  }
+
+  bool unlockSpecies(SpeciesId id) {
+    if (fieldGuide.discover(id)) {
+      announceDiscovery(id);
+      return true;
+    }
+    return false;
+  }
+
+  // Tap-to-follow zoom. Returns true if a creature was locked.
+  bool zoomToCreatureAt(float worldX, float worldY) {
+    int8_t nearestIndex = -1;
+    Fish* nearest = nearestCreatureAt(worldX, worldY, &nearestIndex);
+    if (nearest == nullptr) {
+      tankCamera.zoomOut();
+      return false;
+    }
+    const PVector pos = nearest->getPosition();
+    tankCamera.follow(pos.x, pos.y, nearestIndex, nearest->getSpeciesId());
+    unlockSpecies(nearest->getSpeciesId());
+    return true;
+  }
+
+  void zoomOutCamera() { tankCamera.zoomOut(); }
+
+  bool isCameraNear() const { return tankCamera.isNear(); }
+
+  size_t fishCount() const { return fishArray.size(); }
+
+  Fish* fishAt(size_t index) {
+    return index < fishArray.size() ? fishArray[index].get() : nullptr;
   }
 
   bool isDemoFinished() const {
@@ -347,33 +490,33 @@ class Aquarium {
       fishArray.pop_back();
     }
     while (fishArray.size() < NUM_FISH_START) {
-      fishArray.emplace_back(std::make_unique<Fish>(
-          matrix, safeSpawnPosition(fishArray.size()),
-          initialCreatureAge(fishArray.size()), curatedCreatureType(fishArray.size())));
+      const uint8_t index = static_cast<uint8_t>(fishArray.size());
+      spawnFishAt(index, nextRosterSpecies());
     }
   }
 
   // Initialize fish and store them in a vector of unique pointers
   void initializeFish() {
     fishArray.clear();
+    SpeciesId roster[NUM_FISH_IDEAL];
+    pickWeightedRoster(roster, NUM_FISH_IDEAL);
     for (int i = 0; i < NUM_FISH_START; i++) {
-      fishArray.emplace_back(
-          std::make_unique<Fish>(matrix, safeSpawnPosition(i),
-                                 initialCreatureAge(i),
-                                 curatedCreatureType(i)));
+      spawnFishAt(static_cast<uint8_t>(i), roster[i]);
     }
   }
 
   // Initialize plants and store them in a vector of unique pointers
   void initializePlants() {
     for (int i = 0; i < NUM_PLANTS; i++) {
+      const SpeciesId plantSpecies =
+          (i == 0) ? SpeciesId::Anemone : SpeciesId::Kelp;
       plantArray.emplace_back(std::make_unique<Plants>(
           matrix, matrix->getXResolution() * i / NUM_PLANTS,
-          matrix->getYResolution() + 7));
+          matrix->getYResolution() + 7, plantSpecies));
     }
   }
 
-  void addFood(float x = -1) {
+  Fish* addFood(float x = -1, bool fromTouch = false) {
     if (x < 0) {
       x = random(0, matrix->getXResolution());
     }
@@ -396,6 +539,10 @@ class Aquarium {
     if (closestFish) {
       closestFish->setFood(foodArray.back().get());
     }
+    if (fromTouch) {
+      recordTouchPellet(closestFish);
+    }
+    return closestFish;
   }
 
   uint8_t activeFoodCount() {
@@ -420,11 +567,15 @@ class Aquarium {
   void scheduleNextAutonomousFood(bool bootWindow = false) {
 #if CYD_AUTONOMOUS_LIFE
     lastAutonomousFoodTime = millis();
-    nextAutonomousFoodDelay =
-        bootWindow ? randomDelayBetween(CYD_AUTONOMOUS_BOOT_MIN_MS,
-                                        CYD_AUTONOMOUS_BOOT_MAX_MS)
-                   : randomDelayBetween(CYD_AUTONOMOUS_FOOD_MIN_MS,
-                                        CYD_AUTONOMOUS_FOOD_MAX_MS);
+    unsigned long minDelay = bootWindow ? CYD_AUTONOMOUS_BOOT_MIN_MS
+                                        : CYD_AUTONOMOUS_FOOD_MIN_MS;
+    unsigned long maxDelay = bootWindow ? CYD_AUTONOMOUS_BOOT_MAX_MS
+                                        : CYD_AUTONOMOUS_FOOD_MAX_MS;
+    if (weekendMode && !bootWindow) {
+      minDelay = (minDelay * 2) / 3;
+      maxDelay = (maxDelay * 2) / 3;
+    }
+    nextAutonomousFoodDelay = randomDelayBetween(minDelay, maxDelay);
 #else
     (void)bootWindow;
 #endif
@@ -450,10 +601,369 @@ class Aquarium {
     }
 
     if (activeFoodCount() < CYD_AUTONOMOUS_MAX_FOOD) {
-      addFood(autonomousFoodX());
+      addFood(autonomousFoodX(), false);
     }
     scheduleNextAutonomousFood(false);
 #endif
+  }
+
+  void recordTouchPellet(Fish* fish) {
+    const unsigned long now = millis();
+    touchPelletTimes[touchPelletHead] = now;
+    touchPelletFish[touchPelletHead] = fish;
+    touchPelletHead = (touchPelletHead + 1) % TOUCH_PELLET_HISTORY;
+    if (touchPelletStored < TOUCH_PELLET_HISTORY) {
+      touchPelletStored++;
+    }
+
+    uint8_t recent = 0;
+    Fish* countsFish[TOUCH_PELLET_HISTORY] = {};
+    uint8_t counts[TOUCH_PELLET_HISTORY] = {};
+    uint8_t uniqueFish = 0;
+    for (uint8_t i = 0; i < touchPelletStored; ++i) {
+      const uint8_t idx =
+          (touchPelletHead + TOUCH_PELLET_HISTORY - 1 - i) % TOUCH_PELLET_HISTORY;
+      if (now - touchPelletTimes[idx] > 4000) {
+        break;
+      }
+      recent++;
+      Fish* candidate = touchPelletFish[idx];
+      if (candidate == nullptr) {
+        continue;
+      }
+      bool found = false;
+      for (uint8_t j = 0; j < uniqueFish; ++j) {
+        if (countsFish[j] == candidate) {
+          counts[j]++;
+          found = true;
+          break;
+        }
+      }
+      if (!found && uniqueFish < TOUCH_PELLET_HISTORY) {
+        countsFish[uniqueFish] = candidate;
+        counts[uniqueFish] = 1;
+        uniqueFish++;
+      }
+    }
+
+    if (recent >= 8 && murkUntilMs < now) {
+      Fish* plumpTarget = fish;
+      uint8_t bestCount = 0;
+      for (uint8_t j = 0; j < uniqueFish; ++j) {
+        if (counts[j] > bestCount) {
+          bestCount = counts[j];
+          plumpTarget = countsFish[j];
+        }
+      }
+      startOverfeedMess(plumpTarget);
+    }
+  }
+
+  bool fishStillPresent(Fish* target) const {
+    if (target == nullptr) {
+      return false;
+    }
+    for (const auto& fish : fishArray) {
+      if (fish.get() == target) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void startOverfeedMess(Fish* plumpTarget) {
+    const unsigned long now = millis();
+    murkUntilMs = now + 50000;
+    if (fishStillPresent(plumpTarget)) {
+      plumpTarget->setPlump(1.7f, 50000);
+      const PVector pos = plumpTarget->getPosition();
+      burpX = static_cast<int16_t>(pos.x);
+      burpBaseY = static_cast<int16_t>(pos.y);
+      burpUntilMs = now + 1500;
+    }
+  }
+
+  void updateOverfeedEffects() {
+    const unsigned long now = millis();
+    if (murkUntilMs > now) {
+      const float remaining =
+          static_cast<float>(murkUntilMs - now) / 50000.0f;
+      water.setMurk(constrain(remaining, 0.0f, 1.0f));
+    } else {
+      water.setMurk(0.0f);
+    }
+
+    if (burpUntilMs > now && matrix->foreground != nullptr) {
+      const float t =
+          1.0f - static_cast<float>(burpUntilMs - now) / 1500.0f;
+      const int16_t y =
+          burpBaseY - static_cast<int16_t>(t * 12.0f);
+      const int16_t x = burpX + static_cast<int16_t>(sinf(t * 6.0f) * 2.0f);
+      matrix->foreground->drawPixel(x, y, CRGB(200, 230, 255));
+      if ((millis() / 80) % 2 == 0) {
+        matrix->foreground->drawPixel(x, y - 1, CRGB(140, 180, 210));
+      }
+    }
+  }
+
+  const char* nextPokePhrase(const String& bodyType) {
+    if (bodyType == "Turtle") {
+      return "GERALD";
+    }
+    static const char* phrases[] = {"NOM", "HI", "ZZZ", "OOF", "HEY"};
+    const char* phrase = phrases[pokePhraseIndex % 5];
+    pokePhraseIndex++;
+    return phrase;
+  }
+
+  bool pokeCreature(float x, float y) {
+    Fish* nearest = nearestCreatureAt(x, y, nullptr);
+    if (nearest == nullptr) {
+      return false;
+    }
+
+    nearest->poke();
+    const PVector pos = nearest->getPosition();
+    const char* phrase = nextPokePhrase(nearest->getBodyType());
+    strncpy(pokeBubbleText, phrase, sizeof(pokeBubbleText) - 1);
+    pokeBubbleText[sizeof(pokeBubbleText) - 1] = '\0';
+
+    const int16_t width = matrix->getXResolution();
+    const int16_t height = matrix->getYResolution();
+    const int16_t textW =
+        static_cast<int16_t>(strlen(pokeBubbleText) * 4);
+    pokeBubbleX = static_cast<int16_t>(pos.x) - textW / 2;
+    pokeBubbleY = static_cast<int16_t>(pos.y) - 8;
+    if (pokeBubbleX < 1) {
+      pokeBubbleX = 1;
+    }
+    if (pokeBubbleX + textW > width - 1) {
+      pokeBubbleX = width - 1 - textW;
+    }
+    if (pokeBubbleY < 14) {
+      pokeBubbleY = 14;
+    }
+    if (pokeBubbleY > height - 14) {
+      pokeBubbleY = height - 14;
+    }
+    pokeBubbleUntilMs = millis() + 1200;
+    return true;
+  }
+
+  void dropPellet(float x = -1) {
+    addFood(x, false);
+  }
+
+  void showDiary() {
+    const unsigned long uptimeMs = millis() - bootMs;
+    const uint32_t hours = uptimeMs / 3600000UL;
+    snprintf(diaryText, sizeof(diaryText), "%luH  %u ALIVE  %lu EAT",
+             static_cast<unsigned long>(hours),
+             static_cast<unsigned>(fishArray.size()),
+             static_cast<unsigned long>(pelletsEaten));
+    diaryUntilMs = millis() + 8000;
+  }
+
+  bool hasPokeBubble(char* textOut, size_t textSize, int16_t* x,
+                     int16_t* y) const {
+    if (millis() >= pokeBubbleUntilMs || pokeBubbleText[0] == '\0') {
+      return false;
+    }
+    if (textOut != nullptr && textSize > 0) {
+      strncpy(textOut, pokeBubbleText, textSize - 1);
+      textOut[textSize - 1] = '\0';
+    }
+    if (x != nullptr) {
+      *x = pokeBubbleX;
+    }
+    if (y != nullptr) {
+      *y = pokeBubbleY;
+    }
+    return true;
+  }
+
+  bool hasDiary(char* textOut, size_t textSize) const {
+    if (millis() >= diaryUntilMs || diaryText[0] == '\0') {
+      return false;
+    }
+    if (textOut != nullptr && textSize > 0) {
+      strncpy(textOut, diaryText, textSize - 1);
+      textOut[textSize - 1] = '\0';
+    }
+    return true;
+  }
+
+  bool shouldShowTgif() const {
+    return tgifActive;
+  }
+
+  void scheduleNextVisitor(bool first) {
+    if (first) {
+      nextVisitorMs =
+          millis() + randomDelayBetween(4UL * 60000UL, 8UL * 60000UL);
+    } else {
+      nextVisitorMs =
+          millis() + randomDelayBetween(45UL * 60000UL, 75UL * 60000UL);
+    }
+  }
+
+  void startVisitor() {
+    const int kind = random(0, 4);
+    visitorStartMs = millis();
+    visitorX = 0;
+    visitorY = 0;
+    visitorSpeed = 0;
+    switch (kind) {
+      case 0:
+        visitorKind = VisitorKind::CatPaw;
+        visitorX = random(10, matrix->getXResolution() - 10);
+        visitorY = 0;
+        visitorEndMs = visitorStartMs + 2000;
+        break;
+      case 1:
+        visitorKind = VisitorKind::Duck;
+        visitorX = -4;
+        visitorY = 18;
+        visitorSpeed = 0.35f;
+        visitorEndMs = visitorStartMs + 6000;
+        break;
+      case 2:
+        visitorKind = VisitorKind::Diver;
+        visitorX = random(0, 2) == 0 ? 6 : matrix->getXResolution() - 7;
+        visitorY = 12;
+        visitorSpeed = 0.22f;
+        visitorEndMs = visitorStartMs + 8000;
+        break;
+      default:
+        visitorKind = VisitorKind::Shadow;
+        visitorX = -8;
+        visitorY = matrix->getYResolution() / 2;
+        visitorSpeed = 0.55f;
+        visitorEndMs = visitorStartMs + 3500;
+        break;
+    }
+  }
+
+  void scareNear(PVector source, float radius) {
+    for (auto& fish : fishArray) {
+      if (fish->getPosition().dist(source) <= radius) {
+        fish->scareFrom(source);
+      }
+    }
+    boidManager.scareFrom(source, radius);
+  }
+
+  void updateVisitors() {
+    const unsigned long now = millis();
+    if (visitorKind == VisitorKind::None) {
+      if (now >= nextVisitorMs) {
+        startVisitor();
+      }
+      return;
+    }
+
+    if (now >= visitorEndMs) {
+      visitorKind = VisitorKind::None;
+      scheduleNextVisitor(false);
+      return;
+    }
+
+    const float elapsed = static_cast<float>(now - visitorStartMs);
+    switch (visitorKind) {
+      case VisitorKind::CatPaw: {
+        const int16_t x = static_cast<int16_t>(visitorX);
+        for (int16_t dy = 0; dy < 4; ++dy) {
+          for (int16_t dx = -2; dx <= 2; ++dx) {
+            matrix->foreground->drawPixel(x + dx, dy, CRGB(40, 30, 28));
+          }
+        }
+        matrix->foreground->drawPixel(x - 3, 4, CRGB(40, 30, 28));
+        matrix->foreground->drawPixel(x - 1, 5, CRGB(40, 30, 28));
+        matrix->foreground->drawPixel(x + 1, 5, CRGB(40, 30, 28));
+        matrix->foreground->drawPixel(x + 3, 4, CRGB(40, 30, 28));
+        if (elapsed < 200) {
+          scareNear(PVector(visitorX, 8), 18.0f);
+        }
+        break;
+      }
+      case VisitorKind::Duck: {
+        visitorX += visitorSpeed;
+        const int16_t x = static_cast<int16_t>(visitorX);
+        const int16_t y = static_cast<int16_t>(visitorY);
+        for (int16_t dy = 0; dy < 3; ++dy) {
+          for (int16_t dx = 0; dx < 5; ++dx) {
+            matrix->foreground->drawPixel(x + dx, y + dy, CRGB(255, 200, 40));
+          }
+        }
+        matrix->foreground->drawPixel(x + 5, y + 1, CRGB(255, 120, 20));
+        matrix->foreground->drawPixel(x + 1, y - 1, CRGB(255, 220, 80));
+        break;
+      }
+      case VisitorKind::Diver: {
+        visitorY += visitorSpeed;
+        const int16_t x = static_cast<int16_t>(visitorX);
+        const int16_t y = static_cast<int16_t>(visitorY);
+        matrix->foreground->drawPixel(x, y, CRGB(220, 220, 240));
+        matrix->foreground->drawPixel(x, y + 1, CRGB(30, 90, 180));
+        matrix->foreground->drawPixel(x, y + 2, CRGB(30, 90, 180));
+        matrix->foreground->drawPixel(x - 1, y + 1, CRGB(200, 40, 40));
+        matrix->foreground->drawPixel(x + 1, y + 3, CRGB(180, 180, 200));
+        break;
+      }
+      case VisitorKind::Shadow: {
+        visitorX += visitorSpeed;
+        const int16_t x = static_cast<int16_t>(visitorX);
+        const int16_t midY = matrix->getYResolution() / 2;
+        for (int16_t dy = -10; dy <= 10; ++dy) {
+          const uint8_t shade = 18 + abs(dy);
+          for (int16_t dx = 0; dx < 10; ++dx) {
+            matrix->foreground->drawPixel(x + dx, midY + dy,
+                                          CRGB(shade, shade, shade + 8));
+          }
+        }
+        scareNear(PVector(visitorX + 5, midY), 22.0f);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  void applyDayContext(const tm* localTime) {
+    if (localTime == nullptr) {
+      weekendMode = false;
+      tgifActive = false;
+      boidManager.setWeekendSchooling(false);
+      return;
+    }
+
+    const bool isFriday = localTime->tm_wday == 5;
+    const bool isWeekend =
+        localTime->tm_wday == 0 || localTime->tm_wday == 6;
+    tgifActive = isFriday && localTime->tm_hour >= 16;
+    weekendMode = isWeekend;
+    boidManager.setWeekendSchooling(weekendMode);
+
+    if (weekendMode && !fishArray.empty()) {
+      PVector centroid(0, 0);
+      uint8_t count = 0;
+      for (const auto& fish : fishArray) {
+        if (!fish->isPokeable()) {
+          continue;
+        }
+        centroid = centroid + fish->getPosition();
+        count++;
+      }
+      if (count > 0) {
+        centroid.x /= count;
+        centroid.y /= count;
+        for (auto& fish : fishArray) {
+          if (fish->isPokeable()) {
+            fish->schoolToward(centroid);
+          }
+        }
+      }
+    }
   }
 
   float currentHumidity() {
@@ -520,23 +1030,29 @@ class Aquarium {
       }
     }
 
-    // Population control
+    // Keep the cast at NUM_FISH_IDEAL with weighted distinct species.
     if (fishArray.size() < NUM_FISH_IDEAL) {
-      // Attempt to create new fish
-      for (auto& fish : fishArray) {
-        if (fish->tryReproduce()) {
-          PVector newPos = fish->getPosition();
-          fishArray.emplace_back(std::make_unique<Fish>(matrix, newPos));
-          break;  // Only add one fish per update cycle
-        }
+      const SpeciesId id = nextRosterSpecies();
+      const uint8_t index = static_cast<uint8_t>(fishArray.size());
+      spawnFishAt(index, id);
+      scheduleNextSpeciesRefill();
+    } else if (millis() >= nextSpeciesRefillMs) {
+      // Swap the oldest adult for a fresh weighted pick.
+      if (!fishArray.empty()) {
+        fishArray.erase(fishArray.begin());
+        spawnFishAt(static_cast<uint8_t>(fishArray.size()), nextRosterSpecies());
       }
+      scheduleNextSpeciesRefill();
     }
   }
 
   void updateFood() {
     for (auto it = foodArray.begin(); it != foodArray.end();) {
       (*it)->update();
-      if ((*it)->isOffScreen() || (*it)->isEaten()) {
+      if ((*it)->isEaten()) {
+        pelletsEaten++;
+        it = foodArray.erase(it);
+      } else if ((*it)->isOffScreen()) {
         it = foodArray.erase(it);
       } else {
         (*it)->display();
@@ -550,22 +1066,22 @@ class Aquarium {
     if (touchActive) {
       unsigned long currentTime = millis();
       if (currentTime - lastFoodTime >= FOOD_INTERVAL) {
-        addFood();
+        addFood(-1, true);
         lastFoodTime = currentTime;
       }
     }
   }
 
-  // Called externally when touch is detected on pin 13 (and menu is not open)
+  // Called externally when a feed-hold gesture begins
   void onTouchStarted() {
     if (!touchActive) {
       touchActive = true;
-      addFood();
+      addFood(-1, true);
       lastFoodTime = millis();
     }
   }
 
-  // Called externally when touch is released on pin 13
+  // Called externally when touch is released
   void onTouchReleased() {
     touchActive = false;
   }
@@ -601,7 +1117,8 @@ class Aquarium {
   }
 
   // General update function that updates all components of the aquarium
-  void update(bool showSensorData = false) {
+  void update(bool showSensorData = false, const tm* localTime = nullptr) {
+    applyDayContext(localTime);
     handleTouchInput();
     handleAutonomousLife();
 
@@ -614,12 +1131,63 @@ class Aquarium {
       updateFish();
       updateFood();
       updatePlants();
+      updateOverfeedEffects();
+      updateVisitors();
       updateSensorData(showSensorData);
       periodicSave();
     }
   }
 
+  void unlockAmbientInView() {
+    if (!tankCamera.isNear()) {
+      return;
+    }
+    const float midY = tankCamera.originY + tankCamera.windowHeight() * 0.5f;
+    if (midY > matrix->getYResolution() * 0.55f) {
+      for (const auto& plant : plantArray) {
+        const SpeciesId id = plant->getSpeciesId();
+        if (!fieldGuide.isDiscovered(id)) {
+          unlockSpecies(id);
+        }
+      }
+    } else if (!fieldGuide.isDiscovered(SpeciesId::Chromis)) {
+      chromisDiscovered = true;
+      unlockSpecies(SpeciesId::Chromis);
+    }
+    if (!fieldGuide.isDiscovered(SpeciesId::FishFlake) && !foodArray.empty()) {
+      for (const auto& food : foodArray) {
+        if (food->isEaten() || food->isOffScreen()) {
+          continue;
+        }
+        const PVector fp = food->getPosition();
+        if (fp.x >= tankCamera.originX &&
+            fp.x < tankCamera.originX + tankCamera.windowWidth() &&
+            fp.y >= tankCamera.originY &&
+            fp.y < tankCamera.originY + tankCamera.windowHeight()) {
+          flakeDiscovered = true;
+          unlockSpecies(SpeciesId::FishFlake);
+          break;
+        }
+      }
+    }
+  }
+
+  void syncCamera() {
+    if (tankCamera.following && tankCamera.followFishIndex >= 0 &&
+        static_cast<size_t>(tankCamera.followFishIndex) < fishArray.size()) {
+      const PVector pos =
+          fishArray[tankCamera.followFishIndex]->getPosition();
+      tankCamera.updateFollow(pos.x, pos.y);
+    }
+    tankCamera.easeStep();
+    TankDetail::nearView = tankCamera.isNear();
+    matrix->setCameraView(tankCamera.zoom, tankCamera.originX,
+                          tankCamera.originY);
+    unlockAmbientInView();
+  }
+
   void display() {
+    syncCamera();
     matrix->compositeLayers();
   }
 

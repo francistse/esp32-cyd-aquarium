@@ -14,24 +14,22 @@
 #include "Body/BodyVariations/BodyFactory.h"
 #include "Food.h"
 #include "Motion/MotionFactory.h"
-
-#ifndef CYD_RICH_CREATURE_MIX
-#define CYD_RICH_CREATURE_MIX 0
-#endif
+#include "SpeciesCatalog.h"
 
 class Fish {
   Matrix* matrix = nullptr;
   PVector pos;
   float age;
   float health;
-  BodyFactory* bodyFactory = nullptr;
   uint8_t offspringCount = 0;
+  SpeciesId speciesId = SpeciesId::Clownfish;
 
-  std::unique_ptr<Motion>
-      motion;  // Use smart pointer for automatic memory management
+  std::unique_ptr<Motion> motion;
   std::unique_ptr<Body> body;
 
   Food* food = nullptr;
+  float plumpScale = 1.0f;
+  unsigned long plumpUntilMs = 0;
 
   static PVector randomSafePosition(Matrix* matrix) {
     const uint8_t width = matrix->getXResolution();
@@ -57,11 +55,49 @@ class Fish {
     return PVector(random(minX, maxX), random(minY, maxY));
   }
 
-  struct BodyMotionType {
-    String bodyType;
-    String motionType;
-    double probability;
-  };
+  void bindBodyAndMotion(SpeciesId species) {
+    speciesId = species;
+    const SpeciesInfo& info = speciesInfo(species);
+    BodyFactory bodyFactory(matrix);
+    this->body = std::unique_ptr<Body>(bodyFactory.createBody(species));
+    if (!this->body) {
+      speciesId = SpeciesId::Clownfish;
+      this->body = std::unique_ptr<Body>(
+          bodyFactory.createBody(SpeciesId::Clownfish));
+    }
+
+    const char* motionKey = info.motionType;
+    if (!info.isSwimmer || isFishMotionSpecies(speciesId)) {
+      // Non-swimmers should not use this path; fish species share Fish motion.
+      if (isFishMotionSpecies(speciesId)) {
+        motionKey = "Fish";
+      }
+    }
+
+    this->motion = MotionFactory::createMotion(
+        motionKey, this->pos * PHYSICS_SCALE,
+        matrix->getXResolution() * PHYSICS_SCALE,
+        matrix->getYResolution() * PHYSICS_SCALE);
+    if (!this->motion) {
+      this->motion = MotionFactory::createMotion(
+          "Fish", this->pos * PHYSICS_SCALE,
+          matrix->getXResolution() * PHYSICS_SCALE,
+          matrix->getYResolution() * PHYSICS_SCALE);
+    }
+
+    fishDefinition = {age,
+                      health,
+                      String(speciesInfo(speciesId).bodyType),
+                      this->body->getHeadType(),
+                      this->body->getTailType(),
+                      this->body->getFinType(),
+                      String(speciesInfo(speciesId).motionType),
+                      this->body->getColorPaletteHSV()};
+    // Fish motion key for the four fish species.
+    if (isFishMotionSpecies(speciesId)) {
+      fishDefinition.motionType = "Fish";
+    }
+  }
 
  public:
   struct FishDefinition {
@@ -73,6 +109,7 @@ class Fish {
     String finType;
     String motionType;
     std::vector<CHSV> colors;
+    int16_t speciesId = -1;  // >=0 prefers numeric id over bodyType
   };
 
   FishDefinition fishDefinition;
@@ -84,155 +121,79 @@ class Fish {
       : matrix(matrix),
         pos(PVector(0, 0)),
         age(fishDef.age),
-        health(fishDef.health) {  // Member initializer list
-    BodyFactory bodyFactory(matrix);
+        health(fishDef.health) {
     initializeAgingRate();
     pos = randomSafePosition(matrix);
-
-    this->body = std::unique_ptr<Body>(bodyFactory.createBody(
-        fishDef.bodyType, fishDef.headType, fishDef.tailType, fishDef.finType));
-    this->motion =
-        MotionFactory::createMotion(fishDef.motionType, pos * PHYSICS_SCALE,
-                                    matrix->getXResolution() * PHYSICS_SCALE,
-                                    matrix->getYResolution() * PHYSICS_SCALE);
-
-    if (!fishDef.colors.empty()) {
-      body->setColorPaletteHSV(fishDef.colors);
+    SpeciesId loaded = SpeciesId::Clownfish;
+    if (fishDef.speciesId >= 0 &&
+        fishDef.speciesId < static_cast<int16_t>(SPECIES_COUNT) &&
+        isSwimmerSpecies(static_cast<SpeciesId>(fishDef.speciesId))) {
+      loaded = static_cast<SpeciesId>(fishDef.speciesId);
+    } else {
+      loaded = speciesIdFromBodyType(fishDef.bodyType);
+      if (!isSwimmerSpecies(loaded)) {
+        loaded = SpeciesId::Clownfish;
+      }
     }
-
-    fishDefinition = fishDef;
+    bindBodyAndMotion(loaded);
+    // Catalog palettes win; ignore legacy random hues.
+    fishDefinition.age = age;
+    fishDefinition.health = health;
   }
 
   Fish(Matrix* matrix, PVector pos = PVector(0, 0), float age = 0,
        float health = 1)
       : matrix(matrix), pos(pos), age(age), health(health) {
-    BodyFactory bodyFactory(matrix);
     initializeAgingRate();
-
-    std::vector<BodyMotionType> types = {{"Fish", "Fish", 0.5},
-                                         {"Star", "Star", 0.1},
-                                         {"Turtle", "Turtle", 0.2},
-                                         {"Snake", "Snake", 0.1},
-                                         {"Octopus", "Octopus", 0.1}};
-#if CYD_RICH_CREATURE_MIX
-    types = {{"Fish", "Fish", 0.62},
-             {"Star", "Star", 0.18},
-             {"Turtle", "Turtle", 0.08},
-             {"Snake", "Snake", 0.06},
-             {"Octopus", "Octopus", 0.06}};
-#endif
-
-    auto selectedType = selectType(types);
-
-    this->body =
-        std::unique_ptr<Body>(bodyFactory.createBody(selectedType.bodyType));
-    if (!this->body) {
-      // Fallback to a default body type if creation fails
-      this->body = std::unique_ptr<Body>(bodyFactory.createBody("Fish"));
-    }
-
     if (this->pos.x == 0 && this->pos.y == 0) {
       this->pos = randomSafePosition(matrix);
     }
-
-    // Ensure the motion is created successfully
-    this->motion = MotionFactory::createMotion(
-        selectedType.motionType, this->pos * PHYSICS_SCALE,
-        matrix->getXResolution() * PHYSICS_SCALE,
-        matrix->getYResolution() * PHYSICS_SCALE);
-    if (!this->motion) {
-      // Fallback to a default motion type if creation fails
-      this->motion = MotionFactory::createMotion(
-          "Fish", this->pos * PHYSICS_SCALE,
-          matrix->getXResolution() * PHYSICS_SCALE,
-          matrix->getYResolution() * PHYSICS_SCALE);
-    }
-
-    fishDefinition = {age,
-                      health,
-                      selectedType.bodyType,
-                      this->body->getHeadType(),
-                      this->body->getTailType(),
-                      this->body->getFinType(),
-                      selectedType.motionType,
-                      this->body->getColorPaletteHSV()};
+    bindBodyAndMotion(randomSwimmerSpecies());
   }
 
   Fish(Matrix* matrix, PVector pos, float age, const char* bodyType,
        float health = 1)
       : matrix(matrix), pos(pos), age(age), health(health) {
-    BodyFactory bodyFactory(matrix);
     initializeAgingRate();
-
-    String selectedType = bodyType;
-    if (selectedType != "Fish" && selectedType != "Star" &&
-        selectedType != "Turtle" && selectedType != "Snake" &&
-        selectedType != "Octopus") {
-      selectedType = "Fish";
-    }
-
-    this->body =
-        std::unique_ptr<Body>(bodyFactory.createBody(selectedType));
-    if (!this->body) {
-      selectedType = "Fish";
-      this->body = std::unique_ptr<Body>(bodyFactory.createBody("Fish"));
-    }
-
     if (this->pos.x == 0 && this->pos.y == 0) {
       this->pos = randomSafePosition(matrix);
     }
-
-    this->motion = MotionFactory::createMotion(
-        selectedType, this->pos * PHYSICS_SCALE,
-        matrix->getXResolution() * PHYSICS_SCALE,
-        matrix->getYResolution() * PHYSICS_SCALE);
-    if (!this->motion) {
-      selectedType = "Fish";
-      this->motion = MotionFactory::createMotion(
-          "Fish", this->pos * PHYSICS_SCALE,
-          matrix->getXResolution() * PHYSICS_SCALE,
-          matrix->getYResolution() * PHYSICS_SCALE);
-    }
-
-    fishDefinition = {age,
-                      health,
-                      selectedType,
-                      this->body->getHeadType(),
-                      this->body->getTailType(),
-                      this->body->getFinType(),
-                      selectedType,
-                      this->body->getColorPaletteHSV()};
+    bindBodyAndMotion(speciesIdFromBodyType(String(bodyType)));
   }
-  // ~Fish(); // Destructor
+
+  Fish(Matrix* matrix, PVector pos, float age, SpeciesId species,
+       float health = 1)
+      : matrix(matrix), pos(pos), age(age), health(health) {
+    initializeAgingRate();
+    if (this->pos.x == 0 && this->pos.y == 0) {
+      this->pos = randomSafePosition(matrix);
+    }
+    bindBodyAndMotion(species);
+  }
 
   bool update(long co2 = 600, bool stayInside = false) {
     if (!motion) {
-      log_e(
-          "Error: motion is null in Fish::update for fish type: %s, motion "
-          "type: %s",
-          fishDefinition.bodyType.c_str(), fishDefinition.motionType.c_str());
-      // Attempt to recreate the motion object
+      log_e("Error: motion is null in Fish::update for fish type: %s",
+            fishDefinition.bodyType.c_str());
       this->motion = MotionFactory::createMotion(
           fishDefinition.motionType, pos * PHYSICS_SCALE,
           matrix->getXResolution() * PHYSICS_SCALE,
           matrix->getYResolution() * PHYSICS_SCALE);
       if (!this->motion) {
-        log_e("Failed to recreate motion for fish type: %s, motion type: %s",
-              fishDefinition.bodyType.c_str(),
-              fishDefinition.motionType.c_str());
-        // If recreation fails, return early to prevent crash
         return false;
-      } else {
-        log_i(
-            "Successfully recreated motion for fish type: %s, motion type: %s",
-            fishDefinition.bodyType.c_str(), fishDefinition.motionType.c_str());
       }
+    }
+    if (plumpUntilMs != 0 && millis() >= plumpUntilMs) {
+      plumpScale = 1.0f;
+      plumpUntilMs = 0;
     }
     motion->update(age, co2, stayInside);
     pos = motion->getPosition() / PHYSICS_SCALE;
     updateAge(co2);
     updateHealth(co2);
-    body->update(pos, motion->getVelocity(), motion->getAngle(), age, health);
+    const float displayAge = constrain(age * plumpScale, 0.0f, 0.98f);
+    body->update(pos, motion->getVelocity(), motion->getAngle(), displayAge,
+                 health);
     if (food != nullptr) {
       PVector foodDistance = food->getPosition() - pos;
       if (food->isOffScreen()) {
@@ -242,36 +203,96 @@ class Fish {
         food = nullptr;
       } else {
         motion->followFood(food->getPosition() * PHYSICS_SCALE);
-        // matrix->foreground->drawLine(pos.x,pos.y,food->getPosition().x,food->getPosition().y,
-        // CRGB(255,0,0));
       }
     }
-    if (age > 1.0)
-      age = 0;
+    if (age > 1.0) age = 0;
     return age > 1.0;
   }
 
   bool tryReproduce() {
-    // Fish can only reproduce if they're between 0.5 and 0.9 age and have less
-    // than 2 offspring
     if (age > 0.5 && age < 0.9 && offspringCount < 2) {
       auto seed = std::chrono::system_clock::now().time_since_epoch().count();
       std::mt19937 gen(seed);
       std::uniform_real_distribution<> dis(0.0, 1.0);
-      if (dis(gen) < 0.01) {  // 1% chance of reproduction per update
-        offspringCount++;     // Increment offspring count
+      if (dis(gen) < 0.01) {
+        offspringCount++;
         return true;
       }
     }
     return false;
   }
 
-  PVector getPosition() const {
-    return PVector(pos.x, pos.y);
-  }
+  PVector getPosition() const { return PVector(pos.x, pos.y); }
 
-  PVector getVelocity() const {
-    return motion->getVelocity();
+  PVector getVelocity() const { return motion->getVelocity(); }
+
+  float getAngle() const { return motion ? motion->getAngle() : 0.0f; }
+
+  // Outside distance to an age/species-scaled oriented capsule (0 = solid hit).
+  float tapHitDistance(float worldX, float worldY) const {
+    const float size = constrain(age, 0.0f, 0.98f);
+    const float sc = sizeClassScale(speciesInfo(speciesId).sizeClass);
+    float forward = 2.0f * size * sc;
+    float back = 10.0f * size * sc;
+    float radius = 2.5f * size * sc + 1.5f;
+
+    switch (speciesInfo(speciesId).silhouette) {
+      case SilhouetteKind::BlueTang:
+      case SilhouetteKind::YellowTang:
+      case SilhouetteKind::MoorishIdol:
+        forward = 2.5f * size * sc;
+        back = 5.5f * size * sc;
+        radius = 3.5f * size * sc + 1.5f;
+        break;
+      case SilhouetteKind::Turtle:
+        forward = 5.0f * size * sc;
+        back = 5.0f * size * sc;
+        radius = 3.5f * size * sc + 1.5f;
+        break;
+      case SilhouetteKind::Star:
+        forward = 5.0f * size * sc;
+        back = 5.0f * size * sc;
+        radius = 2.5f * size * sc + 1.5f;
+        break;
+      case SilhouetteKind::Snake:
+        forward = 2.0f * size * sc;
+        back = 22.0f * size * sc;
+        radius = 2.5f * size * sc + 1.5f;
+        break;
+      case SilhouetteKind::Octopus:
+        forward = 4.0f * size * sc;
+        back = 10.0f * size * sc;
+        radius = 4.0f * size * sc + 2.0f;
+        break;
+      case SilhouetteKind::Shark:
+      case SilhouetteKind::WhaleShark:
+      case SilhouetteKind::Whale:
+        forward = 4.0f * size * sc;
+        back = 12.0f * size * sc;
+        radius = 3.0f * size * sc + 1.5f;
+        break;
+      case SilhouetteKind::Manta:
+        forward = 4.0f * size * sc;
+        back = 6.0f * size * sc;
+        radius = 5.0f * size * sc + 1.5f;
+        break;
+      case SilhouetteKind::Clownfish:
+      case SilhouetteKind::Schooler:
+      default:
+        break;
+    }
+
+    const float angle = getAngle();
+    const float cosA = cosf(angle);
+    const float sinA = sinf(angle);
+    const float dx = worldX - pos.x;
+    const float dy = worldY - pos.y;
+    const float along = dx * cosA + dy * sinA;
+    const float across = -dx * sinA + dy * cosA;
+    const float clampedAlong = constrain(along, -back, forward);
+    const float dAlong = along - clampedAlong;
+    const float distToCenterline = sqrtf(dAlong * dAlong + across * across);
+    return max(0.0f, distToCenterline - radius);
   }
 
   void display() {
@@ -281,47 +302,53 @@ class Fish {
       body->display();
   }
 
-  float getAge() {
-    return age;
+  float getAge() { return age; }
+
+  void setFood(Food* assignedFood) { food = assignedFood; }
+
+  Food* getFood() { return food; }
+
+  float getHealth() const { return health; }
+  String getBodyType() const { return fishDefinition.bodyType; }
+  String getHeadType() const { return fishDefinition.headType; }
+  String getTailType() const { return fishDefinition.tailType; }
+  String getFinType() const { return fishDefinition.finType; }
+  String getMotionType() const { return fishDefinition.motionType; }
+  SpeciesId getSpeciesId() const { return speciesId; }
+
+  void poke() {
+    if (motion) {
+      motion->startWiggle(400);
+    }
   }
 
-  void setFood(Food* assignedFood) {
-    food = assignedFood;
+  void scareFrom(PVector source) {
+    if (motion) {
+      motion->scareFrom(source * PHYSICS_SCALE);
+    }
   }
 
-  Food* getFood() {
-    return food;
+  void schoolToward(PVector target) {
+    if (motion) {
+      motion->schoolToward(target * PHYSICS_SCALE);
+    }
   }
 
-  float getHealth() const {
-    return health;
+  void setPlump(float scale, unsigned long durationMs) {
+    plumpScale = scale;
+    plumpUntilMs = millis() + durationMs;
   }
-  String getBodyType() const {
-    return fishDefinition.bodyType;
-  }
-  String getHeadType() const {
-    return fishDefinition.headType;
-  }
-  String getTailType() const {
-    return fishDefinition.tailType;
-  }
-  String getFinType() const {
-    return fishDefinition.finType;
-  }
-  String getMotionType() const {
-    return fishDefinition.motionType;
-  }
+
+  bool isPokeable() const { return age > AGE_EGG && age < AGE_DEAD; }
 
  private:
   unsigned long lastUpdateTime = millis();
   float agingRate;
 
   void initializeAgingRate() {
-    float baseRate = 1.0f / (FISH_LIFESPAN_DAYS * 24 * 60 * 60 *
-                             1000);  // Convert days to milliseconds
-    float variation = FISH_LIFESPAN_VARIATION *
-                      ((float)random(200) / 100.0f -
-                       1.0f);  // Random variation between -20% and +20%
+    float baseRate = 1.0f / (FISH_LIFESPAN_DAYS * 24 * 60 * 60 * 1000);
+    float variation =
+        FISH_LIFESPAN_VARIATION * ((float)random(200) / 100.0f - 1.0f);
     agingRate = baseRate * (1.0f + variation);
   }
 
@@ -343,21 +370,6 @@ class Fish {
       health += HEALTH_INCREASE_RATE_GOOD;
     }
     health = max(0.0f, min(1.0f, health));
-  }
-
-  BodyMotionType selectType(const std::vector<BodyMotionType>& types) {
-    auto seed = std::chrono::system_clock::now().time_since_epoch().count();
-    std::mt19937 gen(seed);
-
-    // Extract probabilities
-    std::vector<double> probabilities;
-    for (const auto& type : types) {
-      probabilities.push_back(type.probability);
-    }
-
-    std::discrete_distribution<> dist(probabilities.begin(),
-                                      probabilities.end());
-    return types[dist(gen)];
   }
 };
 

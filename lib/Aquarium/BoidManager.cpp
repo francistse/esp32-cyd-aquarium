@@ -26,7 +26,14 @@ void BoidManager::updateBoids(long co2) {
   speedMultiplier /= 100.0f;
   for (auto& group : boidGroups) {
     for (auto& boid : group) {
-      boid.run(group.data(), group.size(),speedMultiplier);
+      if (weekendSchooling) {
+        boid.desiredseparation = 2.0f;
+        boid.neighbordist = 14.0f;
+      } else {
+        boid.desiredseparation = 4.0f;
+        boid.neighbordist = 8.0f;
+      }
+      boid.run(group.data(), group.size(), speedMultiplier);
       boid.avoidBorders();
     }
   }
@@ -35,13 +42,31 @@ void BoidManager::updateBoids(long co2) {
 void BoidManager::renderBoids() {
   for (const auto& group : boidGroups) {
     for (const auto& boid : group) {
-      // Calculate the second point of the line
-      float angle = atan2(boid.velocity.y, boid.velocity.x);
-      int x2 = boid.location.x + cos(angle);
-      int y2 = boid.location.y + sin(angle);
+      // Tiny blue chromis: head, body, tail along velocity.
+      const float angle = atan2(boid.velocity.y, boid.velocity.x);
+      const float x = boid.location.x;
+      const float y = boid.location.y;
+      const float cx = x + cos(angle);
+      const float cy = y + sin(angle);
+      const float tx = x - cos(angle);
+      const float ty = y - sin(angle);
+      const CRGB body(40, 140, 220);
+      const CRGB tail(20, 90, 180);
+      matrix->foreground->drawPixel(cx, cy, body);  // head
+      matrix->foreground->drawPixel(x, y, body);    // body
+      matrix->foreground->drawPixel(tx, ty, tail);  // tail
+    }
+  }
+}
 
-      // Draw the line
-      matrix->foreground->drawLine(boid.location.x, boid.location.y, x2, y2, CRGB(50, 200, 100));
+void BoidManager::setWeekendSchooling(bool enabled) {
+  weekendSchooling = enabled;
+}
+
+void BoidManager::scareFrom(PVector obstacle, float radius) {
+  for (auto& group : boidGroups) {
+    for (auto& boid : group) {
+      boid.repelForce(obstacle, radius);
     }
   }
 }

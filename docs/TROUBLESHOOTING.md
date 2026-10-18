@@ -15,12 +15,13 @@ Start with these known-good flags:
 
 - `ILI9341_2_DRIVER`
 - `USE_HSPI_PORT`
-- `TFT_INVERSION_ON`
+- `TFT_INVERSION_OFF`
 - `CYD_TFT_SWAP_BYTES=1`
 - `CYD_DOT_RENDERER=1`
 
 If colors are inverted or swapped, the first things to inspect are
-`TFT_INVERSION_ON` and `CYD_TFT_SWAP_BYTES`.
+`TFT_INVERSION_OFF`/`ON` and `CYD_TFT_SWAP_BYTES`. This fork ships
+`TFT_INVERSION_OFF` for common CYD panels; some clones need it back to `ON`.
 
 ## Image Is Upside Down
 

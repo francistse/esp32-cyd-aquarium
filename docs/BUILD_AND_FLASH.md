@@ -2,6 +2,10 @@
 
 This guide uses PlatformIO and the default `esp32-2432s028r` environment.
 
+On macOS, prefer the dedicated steps in [MACOS_FLASH.md](MACOS_FLASH.md)
+(`/dev/cu.usbserial-*`, CH340 notes, and the `115200` upload baud used by this
+fork).
+
 ## 1. Install Tools
 
 Install one of these:
@@ -12,11 +16,9 @@ Install one of these:
 ## 2. Clone the Repository
 
 ```powershell
-git clone https://github.com/<owner>/esp32-cyd-aquarium.git
+git clone https://github.com/francistse/esp32-cyd-aquarium.git
 cd esp32-cyd-aquarium
 ```
-
-Replace `<owner>` after the public repository is created.
 
 ## 3. Optional Wi-Fi Secrets
 
@@ -94,11 +96,15 @@ CYD Aquarium boot
 logical=80x106 physical=240x320 viewport=0,1 240x318
 autonomous life=on
 clock wifi_time=on
-auto_backlight=on pin=34
 CYD TFT rotation=2
 CYD TFT pushImage swapBytes=on
 CYD TFT backlight pwm=on pin=21
+backlight manual=40
+backlight control=touch top, left dims, right brightens
 ```
+
+This fork defaults to manual backlight touch control. If auto-brightness is
+enabled instead, you will also see `auto_backlight=on pin=34`.
 
 If Wi-Fi credentials are missing, that is okay:
 

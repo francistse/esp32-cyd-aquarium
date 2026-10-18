@@ -42,4 +42,17 @@ class Matrix {
   GFX_Layer* background = nullptr;
   GFX_Layer* foreground = nullptr;
   GFX_LayerCompositor* gfx_compositor = nullptr;
+
+  // Tank camera crop (1 = full tank, 2 = near). Used by CYD composite.
+  float cameraZoom = 1.0f;
+  float cameraOriginX = 0.0f;
+  float cameraOriginY = 0.0f;
+
+  void setCameraView(float zoom, float originX, float originY) {
+    cameraZoom = zoom < 1.0f ? 1.0f : zoom;
+    cameraOriginX = originX;
+    cameraOriginY = originY;
+  }
+
+  bool isNearCamera() const { return cameraZoom >= 1.5f; }
 };

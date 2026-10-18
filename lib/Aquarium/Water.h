@@ -19,6 +19,7 @@ private:
 
   uint8_t scale = 20;
   float simplexSpeed = .002;
+  float murkAmount = 0.0f;
 
 public:
   Water(Matrix* matrix): matrix(matrix) {
@@ -85,11 +86,21 @@ public:
         if (noiseFactor < 96) noiseFactor = 96; // keep cold from going near-black
         CRGB color = simplexColor;
         color.nscale8(noiseFactor);
+        if (murkAmount > 0.0f) {
+          const CRGB olive(72, 88, 18);
+          const uint8_t blendAmount =
+              static_cast<uint8_t>(constrain(murkAmount * 180.0f, 0.0f, 180.0f));
+          color = blend(color, olive, blendAmount);
+        }
         updateBuffer[row][col] = color;
       }
     }
 
     currentRow += rowsPerUpdate;    
+  }
+
+  void setMurk(float amount) {
+    murkAmount = constrain(amount, 0.0f, 1.0f);
   }
 };
 

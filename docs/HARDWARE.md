@@ -21,19 +21,27 @@ not required for this adaptation.
 
 ## Known Working Display Setup
 
-The default `esp32-2432s028r` PlatformIO environment uses:
+The default `esp32-2432s028r` PlatformIO environment in *this fork* uses:
 
 - `ILI9341_2_DRIVER`
 - `USE_HSPI_PORT`
 - `TFT_BACKLIGHT_ON=HIGH`
-- `TFT_INVERSION_ON`
+- `TFT_INVERSION_OFF` (not `ON` — off so common CYD panels show true colors)
 - `CYD_TFT_SWAP_BYTES=1`
 - `CYD_TFT_ROTATION=2`
 - `CYD_DOT_RENDERER=1`
 - `CYD_FRAMEBUFFER_RENDERER=0`
+- Custom touch mapping in `lib/Matrix/CYD/CydMatrixSettings.h`:
+  - `TOUCH_INVERT_X = true` (CYD XPT2046 reports raw X opposite to screen X)
+  - `TOUCH_SWAP_XY = false`
+  - `TOUCH_INVERT_Y = false`
 - Physical display: `240x320`
 - Aquarium logical frame: `80x106`
 - Viewport: `0,1 240x318`
+
+The upstream project used `TFT_INVERSION_ON`. This fork turns inversion off for
+the default build; if your panel needs it back, flip the flag back in
+`platformio.ini`.
 
 ## Pin Map
 
@@ -62,6 +70,10 @@ Backlight is controlled independently from aquarium colors.
 - PWM resolution: 8 bit.
 - The firmware changes the physical TFT backlight, not the RGB aquarium color
   calibration.
+- In this fork, **manual touch backlight is the default** (`DCYD_AUTO_BACKLIGHT=0`,
+  `DCYD_MANUAL_BACKLIGHT_PERCENT=40`): touch the top strip of the screen, left
+  dims and right brightens. Auto-brightness from the light sensor is still
+  available by enabling `CYD_AUTO_BACKLIGHT=1`.
 
 ## Ambient Light Sensor
 

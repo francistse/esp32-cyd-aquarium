@@ -1,6 +1,8 @@
 # Attribution
 
-ESP32 CYD Aquarium is based on
+ESP32 CYD Aquarium is a fork of
+[Lagerpun/esp32-cyd-aquarium](https://github.com/Lagerpun/esp32-cyd-aquarium),
+which is based on
 [Livegrid OpenMatrix](https://github.com/livegrid/OpenMatrix).
 
 OpenMatrix is an AGPL-3.0 project originally designed for controlling HUB75 RGB
@@ -11,8 +13,8 @@ backlight behavior, and standalone scene tuning for a small ILI9341 TFT module.
 
 ## Original Project
 
-- Project: Livegrid OpenMatrix
-- URL: https://github.com/livegrid/OpenMatrix
+- Upstream fork point: [Lagerpun/esp32-cyd-aquarium](https://github.com/Lagerpun/esp32-cyd-aquarium)
+- Ultimate source: [Livegrid OpenMatrix](https://github.com/livegrid/OpenMatrix)
 - License: GNU Affero General Public License v3.0
 
 ## What This Adaptation Adds
@@ -30,6 +32,21 @@ backlight behavior, and standalone scene tuning for a small ILI9341 TFT module.
 - A default CYD-focused build that does not require external temperature,
   humidity, or CO2 sensors.
 - Public hardware, build, and troubleshooting documentation for CYD users.
+
+### Fork Enhancements (francistse/esp32-cyd-aquarium)
+
+This fork adds, on top of the upstream CYD adaptation:
+
+- Weighted ~100-species reef roster with family silhouettes and size classes.
+- Reef Guide with species discovery tracking and a paged in-tank index/detail.
+- Large fauna (sharks, whale sharks, reef mantas).
+- Tank camera with follow and zoom.
+- `TFT_INVERSION_OFF` for correct colors on common CYD panels.
+- Inverted touch X-axis mapping (`TOUCH_INVERT_X = true`) for the XPT2046.
+- Manual touch backlight control (default) with the onboard light sensor as an
+  auto-brightness option.
+- Arduino core 3.x (pioarduino platform), safer `115200` upload baud.
+- macOS build/flash guide and a memory & flash budget doc.
 
 ## License Note
 

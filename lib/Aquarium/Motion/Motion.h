@@ -35,6 +35,12 @@ class Motion {
   PVector foodDirection;
 
   bool followingFood = false;
+  bool wiggling = false;
+  unsigned long wiggleUntilMs = 0;
+  bool scared = false;
+  PVector scareSource;
+  bool schooling = false;
+  PVector schoolTarget;
 
  public:
   Motion(PVector pos, uint16_t xResolution, uint16_t yResolution)
@@ -54,9 +60,7 @@ class Motion {
     return vel;
   }
 
-  float getAngle() {
-    return angle;
-  }
+  float getAngle() const { return angle; }
 
   virtual void doMotion() = 0;
 
@@ -80,10 +84,33 @@ class Motion {
       PVector foodForce = foodDirection - pos;
       foodForce.setMag(FOOD_FORCE);
       applyForce(foodForce);
-    } else if (followingFood) {
-      PVector foodForce = foodDirection - pos;
-      foodForce.setMag(FOOD_FORCE);
-      applyForce(foodForce);
+    }
+
+    if (wiggling) {
+      if (millis() < wiggleUntilMs) {
+        PVector side = PVector::fromAngle(angle + PI / 2.0f);
+        side *= MAX_FORCE * 2.0f * sinf(millis() * 0.05f);
+        applyForce(side);
+      } else {
+        wiggling = false;
+      }
+    }
+
+    if (scared) {
+      PVector away = pos - scareSource;
+      if (away.mag() < 0.1f) {
+        away = PVector::fromAngle(angle + PI);
+      }
+      away.setMag(FOOD_FORCE);
+      applyForce(away);
+      scared = false;
+    }
+
+    if (schooling) {
+      PVector toSchool = schoolTarget - pos;
+      toSchool.setMag(MAX_FORCE * 0.35f);
+      applyForce(toSchool);
+      schooling = false;
     }
 
     PVector desiredVel = vel;
@@ -184,6 +211,21 @@ class Motion {
   void followFood(PVector foodPos) {
     foodDirection = foodPos;
     followingFood = true;
+  }
+
+  void startWiggle(unsigned long durationMs = 400) {
+    wiggling = true;
+    wiggleUntilMs = millis() + durationMs;
+  }
+
+  void scareFrom(PVector source) {
+    scareSource = source;
+    scared = true;
+  }
+
+  void schoolToward(PVector target) {
+    schoolTarget = target;
+    schooling = true;
   }
 };
 

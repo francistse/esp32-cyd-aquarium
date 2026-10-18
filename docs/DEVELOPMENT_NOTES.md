@@ -35,13 +35,19 @@ for the tested ILI9341 panel:
 - background water is dark teal rather than pure black;
 - TFT inversion and RGB565 byte order are explicitly configured.
 
-Important display flags:
+Important display flags (this fork):
 
 ```ini
--DTFT_INVERSION_ON
+-DTFT_INVERSION_OFF
 -DCYD_TFT_SWAP_BYTES=1
 -DCYD_TFT_TONE_CORRECTION=1
 ```
+
+Note: upstream used `TFT_INVERSION_ON`. This fork sets `TFT_INVERSION_OFF` so a
+common CYD panel renders true colors instead of a photographic negative. The
+touch mapping in `lib/Matrix/CYD/CydMatrixSettings.h` also inverts the X axis
+(`TOUCH_INVERT_X = true`) because the board's XPT2046 reports raw X opposite to
+screen X.
 
 ## Autonomous Life
 
